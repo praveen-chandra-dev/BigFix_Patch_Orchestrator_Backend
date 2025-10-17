@@ -1,6 +1,6 @@
 BigFix Patch Orchestrator — Backend
 
-Node/Express API that talks to IBM BigFix and ServiceNow to power the Patch Orchestrator frontend.
+Node/Express API that talks to HCL BigFix and ServiceNow to power the Patch Orchestrator frontend.
 It executes baseline actions, fetches sandbox results, computes health KPIs from session relevance, validates ServiceNow CHG numbers, and (optionally) emails status.
 
 ✨ Features
