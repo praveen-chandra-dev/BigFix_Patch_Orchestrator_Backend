@@ -66,12 +66,91 @@ const httpsAgent = new https.Agent({
 });
 
 /* ====================== In-memory Action store ====================== */
-/* Keeps the most recent Action ID (and a small map of recent actions) */
 const actionStore = {
   lastActionId: null,
   actions: Object.create(null), // id -> { id, createdAt, xml }
 };
 
+/* ====================== In-memory CONFIG (thresholds) ====================== */
+/* These are used by /api/health/critical. Frontend Configuration page should POST here. */
+const CONFIG = {
+  cpuThresholdPct: 85,  // show critical if CPU >= this
+  ramThresholdPct: 85,  // show critical if RAM >= this
+  diskThresholdGB: 10,
+    // show critical if Disk <= this
+  locked: false,        // optional (if you want to lock editing during a run)
+};
+
+/* ---- Config API ---- */
+app.get("/api/config", (req, res) => {
+  req._logStart = Date.now();
+  log(req, "GET /api/config");
+  // keep your existing shape:
+  // { ok: true, ...CONFIG }
+  res.json({ ok: true, ...CONFIG });
+});
+
+app.post("/api/config", (req, res) => {
+  req._logStart = Date.now();
+  log(req, "POST /api/config body:", req.body);
+  try {
+    const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : undefined);
+
+    // accept canonical keys and legacy aliases (cpuThreshold, etc.)
+    const cpu =
+      num(req.body?.cpuThresholdPct) ??
+      num(req.body?.cpuThreshold);
+    const ram =
+      num(req.body?.ramThresholdPct) ??
+      num(req.body?.ramThreshold);
+    const dsk =
+      num(req.body?.diskThresholdGB) ??
+      num(req.body?.diskThreshold);
+
+    if (cpu === undefined || cpu < 0 || cpu > 100) {
+      return res.status(400).json({ ok: false, message: "cpuPct must be 0..100" });
+    }
+    if (ram === undefined || ram < 0 || ram > 100) {
+      return res.status(400).json({ ok: false, message: "ramPct must be 0..100" });
+    }
+    if (dsk === undefined || dsk < 0) {
+      return res.status(400).json({ ok: false, message: "diskGB must be >= 0" });
+    }
+
+    // ---- NEW: boolean flag (accept several aliases) ----
+    // requireChg | changeRequired | requireChange
+    let requireChgRaw =
+      req.body?.requireChg ??
+      req.body?.changeRequired ??
+      req.body?.requireChange;
+
+    if (requireChgRaw !== undefined) {
+      // accept true/false, "true"/"false", 1/0, "1"/"0"
+      const truthy = [true, "true", 1, "1"];
+      const falsy  = [false, "false", 0, "0"];
+      if (truthy.includes(requireChgRaw)) {
+        CONFIG.requireChg = true;
+      } else if (falsy.includes(requireChgRaw)) {
+        CONFIG.requireChg = false;
+      } else {
+        return res.status(400).json({ ok: false, message: "requireChg must be boolean (true/false)" });
+      }
+    }
+
+    CONFIG.cpuThresholdPct = cpu;
+    CONFIG.ramThresholdPct = ram;
+    CONFIG.diskThresholdGB = dsk;
+
+    // You can enable locking here if required by your flow.
+    // CONFIG.locked = true;
+
+    // keep your existing shape:
+    // { ok: true, config: { ...CONFIG } }
+    res.json({ ok: true, config: { ...CONFIG } });
+  } catch (e) {
+    res.status(400).json({ ok: false, message: e?.message || "Bad request" });
+  }
+});
 /* ====================== Helpers ====================== */
 function joinUrl(base, path) {
   return `${base.replace(/\/+$/, "")}/${path.replace(/^\/+/, "")}`;
@@ -82,7 +161,9 @@ function splitEmails(s) {
 }
 function escapeHtml(s) {
   return String(s || "")
-    .replace(/&/g, "&amp;").replace(/<//g, "&lt;").replace(/>/g, "&gt;");
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }
 
 /* Tiny “tuple” flattener for BigFix /api/query JSON */
@@ -140,7 +221,6 @@ app.get("/health", (req, res) => {
 });
 
 /* ====================== GET /api/query ====================== */
-/* Proxies to BigFix `/api/query?output=json&relevance=...` */
 app.get("/api/query", async (req, res) => {
   req._logStart = Date.now();
   const { relevance } = req.query;
@@ -420,15 +500,12 @@ app.post("/api/actions", async (req, res) => {
 });
 
 /* ====================== Actions helper endpoints ====================== */
-
-// Most recent Action ID (for the UI to “remember” last Sandbox run)
 app.get("/api/actions/last", (req, res) => {
   req._logStart = Date.now();
   log(req, "GET /api/actions/last →", actionStore.lastActionId);
   res.json({ actionId: actionStore.lastActionId });
 });
 
-// Results for a specific action, as table rows
 app.get("/api/actions/:id/results", async (req, res) => {
   req._logStart = Date.now();
   try {
@@ -466,7 +543,6 @@ app.get("/api/actions/:id/results", async (req, res) => {
     }
 
     const rows = parseTupleRows(resp.data).map(parts => {
-      // expected order: server, patch, status, start, end
       const [server, patch, status, start, end] = parts;
       return { server, patch, status, start, end };
     });
@@ -484,7 +560,8 @@ app.get("/api/actions/:id/results", async (req, res) => {
 
 /* ====================== Critical Health (Session Relevance) ====================== */
 /* GET /api/health/critical
-   Show a row if ANY of these is true: RAM ≥ 85 OR CPU ≥ 85 OR Disk ≤ 10 GB
+   Show a row if ANY of these is true:
+   RAM ≥ CONFIG.ramThresholdPct OR CPU ≥ CONFIG.cpuThresholdPct OR Disk ≤ CONFIG.diskThresholdGB
 */
 app.get("/api/health/critical", async (req, res) => {
   req._logStart = Date.now();
@@ -548,11 +625,16 @@ app.get("/api/health/critical", async (req, res) => {
       };
     });
 
-    // ANY-condition filter
+    // thresholds from CONFIG
+    const RAM_T = Number(CONFIG.ramThresholdPct);
+    const CPU_T = Number(CONFIG.cpuThresholdPct);
+    const DSK_T = Number(CONFIG.diskThresholdGB);
+
+    // ANY-condition filter based on CONFIG
     const rows = parsed.filter((r) => {
-      const ramBad  = r.ramPct  != null && r.ramPct  >= 85;
-      const cpuBad  = r.cpuPct  != null && r.cpuPct  >= 85;
-      const diskBad = r.diskGB  != null && r.diskGB  <= 10;
+      const ramBad  = r.ramPct  != null && r.ramPct  >= RAM_T;
+      const cpuBad  = r.cpuPct  != null && r.cpuPct  >= CPU_T;
+      const diskBad = r.diskGB  != null && r.diskGB  <= DSK_T;
       return ramBad || cpuBad || diskBad;
     });
 
@@ -564,7 +646,6 @@ app.get("/api/health/critical", async (req, res) => {
 });
 
 // --- NEW: total computers count (BES) ---
-// GET /api/infra/total-computers  -> { ok:true, total: <number> }
 app.get("/api/infra/total-computers", async (req, res) => {
   req._logStart = Date.now();
   try {
@@ -589,8 +670,6 @@ app.get("/api/infra/total-computers", async (req, res) => {
       return res.status(resp.status).send(resp.data);
     }
 
-    // BigFix JSON for "number of bes computers" is usually {"result":[{"Tuple":["123"]}], ...}
-    // Be defensive and pull the first number we see.
     let total = 0;
     const data = resp.data;
     if (data && data.result && Array.isArray(data.result) && data.result[0]) {
@@ -599,7 +678,6 @@ app.get("/api/infra/total-computers", async (req, res) => {
       const m = String(v).match(/\d+/);
       if (m) total = Number(m[0]);
     }
-    // Final fallback: try to find any number in stringified payload
     if (!total) {
       const m = JSON.stringify(resp.data).match(/\b\d+\b/);
       if (m) total = Number(m[0]);
@@ -616,14 +694,11 @@ app.get("/api/infra/total-computers", async (req, res) => {
 app.get("/api/sn/change/validate", async (req, res) => {
   req._logStart = Date.now();
 
-  // Read envs at request time so there is never a scope issue
   const SN_BASE_RAW = process.env.SN_URL || "";
   const SN_USER = process.env.SN_USER || "";
   const SN_PASSWORD = process.env.SN_PASSWORD || "";
   const allowSelfSigned = String(process.env.SN_ALLOW_SELF_SIGNED || "").toLowerCase() === "true";
 
-  // Normalize base (avoid accidental double /api/now)
-  // Accept either https://instance or https://instance/api/now
   let snBase = SN_BASE_RAW.replace(/\/+$/, "");
   if (/\/api\/now$/i.test(snBase)) {
     snBase = snBase.replace(/\/api\/now$/i, "");
@@ -664,7 +739,6 @@ app.get("/api/sn/change/validate", async (req, res) => {
 
     log(req, "SN GET ←", resp.status);
 
-    // Auth/permission issue
     if (resp.status === 401 || resp.status === 403) {
       return res.json({
         ok: false,
@@ -673,19 +747,16 @@ app.get("/api/sn/change/validate", async (req, res) => {
       });
     }
 
-    // Defensive read of result
     let result = resp?.data?.result;
     if (Array.isArray(result)) {
       // ok
     } else if (result && typeof result === "object") {
-      // some SN apps return a single object directly
       result = [result];
     } else {
       result = [];
     }
 
     if (result.length === 0) {
-      // Truly not found
       return res.json({
         ok: false,
         code: "NOT_FOUND_OR_FORBIDDEN",
@@ -694,11 +765,10 @@ app.get("/api/sn/change/validate", async (req, res) => {
     }
 
     const rec = result[0] || {};
-    const state = String(rec.state || "").trim();    // display value because of sysparm_display_value=true
+    const state = String(rec.state || "").trim();
     const approval = String(rec.approval || "").trim();
     const isImplement = /^implement$/i.test(state);
 
-    // If it exists but is not Implement -> NOT_IMPLEMENT
     if (!isImplement) {
       return res.json({
         ok: false,
@@ -711,7 +781,6 @@ app.get("/api/sn/change/validate", async (req, res) => {
       });
     }
 
-    // Good to go
     return res.json({
       ok: true,
       exists: true,
@@ -723,13 +792,11 @@ app.get("/api/sn/change/validate", async (req, res) => {
     });
   } catch (err) {
     log(req, "SN validate error:", err?.message || err);
-    // Surface a short error for the UI
     res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
 
 /* ====================== NEW: Pilot triggers ====================== */
-/* Helper: validate a CHG directly from server code (no extra HTTP hop) */
 async function validateChangeNumber(number, allowSelfSigned = false) {
   const SN_BASE_RAW = process.env.SN_URL || "";
   const SN_USER = process.env.SN_USER || "";
@@ -779,9 +846,7 @@ async function validateChangeNumber(number, allowSelfSigned = false) {
   return { ok: true, exists: true, implement: true, record: rec };
 }
 
-/* Helper: internal routine to trigger baseline against a group (same as /api/actions) */
 async function triggerBaselineAction(req, { baselineName, groupName, autoMail, mailTo, mailFrom, mailCc, mailBcc }) {
-  // 1) Lookup baseline
   const qBaseline = `(name of site of it, id of it) of bes baseline whose (name of it is "${baselineName.replace(/"/g, '\\"')}")`;
   const urlBaseline = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(qBaseline)}`;
   log(req, "Pilot trigger — baseline lookup →", urlBaseline);
@@ -801,7 +866,6 @@ async function triggerBaselineAction(req, { baselineName, groupName, autoMail, m
   if (partsB.length < 2) throw new Error("Unexpected baseline query shape");
   const siteName = partsB[0]; const fixletId = partsB[1];
 
-  // 2) Lookup group
   const qGroup = `(name of it, id of it, name of site of it, (if automatic flag of it then "Automatic" else if manual flag of it then "manual" else "server based")) of bes computer group whose (name of it is "${groupName.replace(/"/g, '\\"')}")`;
   const urlGroup = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(qGroup)}`;
   log(req, "Pilot trigger — group lookup →", urlGroup);
@@ -821,7 +885,6 @@ async function triggerBaselineAction(req, { baselineName, groupName, autoMail, m
   if (partsG.length < 4) throw new Error("Unexpected group query shape");
   const gName = partsG[0], gId = partsG[1], gSite = partsG[2], gType = partsG[3];
 
-  // 3) Custom Relevance
   const type = toLowerSafe(gType);
   const siteTokenForAutomatic = gSite === "ActionSite" ? `site "actionsite"` : `site "CustomSite_${gSite}"`;
   let customRelevance = "";
@@ -833,7 +896,6 @@ async function triggerBaselineAction(req, { baselineName, groupName, autoMail, m
     customRelevance = `exists true whose ( if true then ( member of server based group "${gName}" of client ) else false)`;
   }
 
-  // 4) XML + POST
   const xml =
     `<?xml version="1.0" encoding="UTF-8"?>` +
     `<BES xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="BES.xsd">` +
@@ -868,7 +930,6 @@ async function triggerBaselineAction(req, { baselineName, groupName, autoMail, m
     actionStore.actions[actionId] = { id: actionId, createdAt: new Date().toISOString(), xml };
   }
 
-  // optional mail reusing existing helper
   if (autoMail) {
     try {
       await sendSandboxMail({
