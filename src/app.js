@@ -3,6 +3,7 @@ const express = require("express");
 const morgan  = require("morgan");
 const cors    = require("cors");
 const { getCtx } = require("./env");
+const { attachDeploymentsRoutes } = require("./routes/deployments");
 
 function tryRequire(p) { try { return require(p); } catch (e) { console.warn(`[skip] ${p}:`, e.message); return null; } }
 function isRouter(mod) { return !!(mod && typeof mod.use === "function" && mod.handle); }
@@ -20,11 +21,20 @@ function buildApp() {
   const app = express();
   const ctx = getCtx();
 
-  app.use(cors());
+  app.use(cors({
+    origin: [
+      /^http:\/\/localhost:\d+$/,
+      /^http:\/\/127\.0\.0\.1:\d+$/,
+    ],
+    credentials: false,
+  }));
   app.use(morgan("dev"));
   app.use(express.json({ limit: "1mb" }));
 
-  // ✅ Mount *our* env router and log exactly which file got mounted
+  // Auth (exposes /api/auth/*)
+  app.use(require("./routes/auth"));
+
+  // Env router (exposes /api/env*, /api/env/status, etc.)
   const envRouterPath = require.resolve("./routes/env");
   console.log("[env-router] mounting:", envRouterPath);
   app.use("/api", require("./routes/env"));
@@ -37,6 +47,7 @@ function buildApp() {
   attachFlexible(app, ctx, "./routes/actionsHelpers", "attachActionHelpers");
   attachFlexible(app, ctx, "./routes/snValidate",     "attachSnValidate");
   attachFlexible(app, ctx, "./routes/pilot",          "attachPilotRoutes");
+  attachDeploymentsRoutes(app, ctx, "./routes/deployments", "attachDeploymentsRoutes");
 
   return app;
 }

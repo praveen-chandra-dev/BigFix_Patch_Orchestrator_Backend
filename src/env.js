@@ -52,6 +52,8 @@ const PERSIST_KEYS = [
   "SN_ALLOW_SELF_SIGNED","SN_URL","SN_USER","SN_PASSWORD",
   "SMTP_ALLOW_SELF_SIGNED","SMTP_HOST","SMTP_PORT","SMTP_SECURE",
   "SMTP_FROM","SMTP_TO","SMTP_CC","SMTP_BCC",
+  // >>> add credentials so UI saves them
+  "SMTP_USER","SMTP_PASSWORD",
   "DEBUG_LOG",
 ];
 
@@ -75,7 +77,8 @@ function writeEnvFull(fullDict) {
 }
 
 /* ---------------- runtime cfg + ctx (with base64 decoding) ---------------- */
-const SECRET_KEYS = new Set(["BIGFIX_PASS", "SN_PASSWORD"]); // (add "SMTP_PASS" if you later add it)
+// include SMTP_PASSWORD so it gets decoded for runtime use
+const SECRET_KEYS = new Set(["BIGFIX_PASS", "SN_PASSWORD", "SMTP_PASSWORD"]);
 
 function b64d(val) {
   try { return Buffer.from(String(val ?? ""), "base64").toString("utf8"); }
@@ -132,6 +135,8 @@ function buildCfg(dictRaw) {
     SMTP_TO: decoded.SMTP_TO || "",
     SMTP_CC: decoded.SMTP_CC || "",
     SMTP_BCC: decoded.SMTP_BCC || "",
+    SMTP_USER: decoded.SMTP_USER || "",
+    SMTP_PASSWORD: decoded.SMTP_PASSWORD || "",             // <-- DECODED
     SMTP_ALLOW_SELF_SIGNED: bool(decoded.SMTP_ALLOW_SELF_SIGNED, false),
 
     DEBUG_LOG: decoded.DEBUG_LOG || "0",
@@ -150,7 +155,8 @@ function buildCfg(dictRaw) {
     },
     smtp: {
       SMTP_HOST: cfg.SMTP_HOST, SMTP_PORT: cfg.SMTP_PORT, SMTP_SECURE: cfg.SMTP_SECURE,
-      SMTP_FROM: cfg.SMTP_FROM, SMTP_TO: cfg.SMTP_TO, SMTP_CC: cfg.SMTP_CC, SMTP_BCC: cfg.SMTP_BCC,
+      SMTP_FROM: cfg.SMTP_FROM, SMTP_TO: cfg.SMTP_TO, SMTP_CC: cfg.SMTP_CC, SMTP_BCC: cfg.SMTP_BCC, 
+      SMTP_USER: cfg.SMTP_USER, SMTP_PASSWORD: cfg.SMTP_PASSWORD,
       SMTP_ALLOW_SELF_SIGNED: cfg.SMTP_ALLOW_SELF_SIGNED,
     },
     DEBUG_LOG: cfg.DEBUG_LOG, // legacy 0/1

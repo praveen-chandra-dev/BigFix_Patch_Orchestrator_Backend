@@ -23,12 +23,14 @@ function attachActionsRoutes(app, ctx) {
       .replace(/'/g, "&apos;");
 
   // normalize EndDateTimeLocalOffset to PTxxH
-  function toPTxH(v) {
-    if (typeof v === "string" && /^PT\d+H$/i.test(v)) return v.toUpperCase();
-    const n = Number(v);
-    if (!Number.isNaN(n) && n > 0) return `PT${Math.floor(n)}H`;
-    return "PT30H"; // default
-  }
+function toPTxH(v) {
+  if (typeof v === "string" && /^PT\d+H$/i.test(v)) return v.toUpperCase();
+  const n = Number(v);
+
+  if (n > 0) return `PT${Math.floor(n)}H`;
+
+  return "P2D"; 
+}
 
   // pick env-provided offset under any of these names
   function pickEndOffset(obj) {
@@ -182,6 +184,7 @@ function attachActionsRoutes(app, ctx) {
         endOffsetHours,
       });
       const xmlOffset = toPTxH(chosenOffset);
+      console.log("Determined XML offset:", xmlOffset);
 
       // 5) Build Action XML (Title → SourceFixlet → Target → Settings)
       const xml =

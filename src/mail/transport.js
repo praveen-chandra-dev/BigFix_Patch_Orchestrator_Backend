@@ -2,7 +2,11 @@
 const { splitEmails, escapeHtml } = require("../utils/http");
 
 function buildTransport(smtp) {
-  const { SMTP_HOST, SMTP_PORT, SMTP_SECURE, SMTP_USER, SMTP_PASS, SMTP_ALLOW_SELF_SIGNED, nodemailer } = smtp;
+  const {
+    SMTP_HOST, SMTP_PORT, SMTP_SECURE, SMTP_USER, SMTP_PASSWORD,
+    SMTP_ALLOW_SELF_SIGNED, nodemailer
+  } = smtp;
+
   const secure = String(SMTP_SECURE).toLowerCase() === "true";
   const allowSelfSigned = String(SMTP_ALLOW_SELF_SIGNED).toLowerCase() === "true";
 
@@ -12,7 +16,12 @@ function buildTransport(smtp) {
     secure,
     tls: { rejectUnauthorized: !allowSelfSigned },
   };
-  if (SMTP_USER || SMTP_PASS) transportOpts.auth = { user: SMTP_USER, pass: SMTP_PASS };
+
+  // use correct password key
+  if (SMTP_USER || SMTP_PASSWORD) {
+    transportOpts.auth = { user: SMTP_USER, pass: SMTP_PASSWORD };
+  }
+
   return nodemailer.createTransport(transportOpts);
 }
 

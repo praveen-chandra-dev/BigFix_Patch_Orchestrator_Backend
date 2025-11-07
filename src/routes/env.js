@@ -21,8 +21,9 @@ const UI_TO_ENV = {
   "EMAIL BCC": "SMTP_BCC",
   "SMTP PORT": "SMTP_PORT",
   "SMTP SECURE": "SMTP_SECURE",
+  "SMTP USERNAME": "SMTP_USER",
+  "SMTP PASSWORD": "SMTP_PASSWORD",        // ← keep only this (was duplicated)
   "SMTP ALLOW SELF SIGNED": "SMTP_ALLOW_SELF_SIGNED",
-  "SMTP PASSWORD": "SMTP_PASS", // if/when you start using it
 
   // ServiceNow
   "SERVICENOW URL": "SN_URL",
@@ -30,11 +31,11 @@ const UI_TO_ENV = {
   "SERVICENOW PASSWORD": "SN_PASSWORD",
   "SERVICENOW ALLOW SELF SIGNED": "SN_ALLOW_SELF_SIGNED",
 
-  // Debug (UI shows Info/Debug, backend historically expects 0/1)
+  // Debug
   "DEBUG LEVEL": "DEBUG_LOG",
 };
 
-const SECRET_KEYS = new Set(["BIGFIX_PASS", "SN_PASSWORD", "SMTP_PASS"]);
+const SECRET_KEYS = new Set(["BIGFIX_PASS", "SN_PASSWORD", "SMTP_PASSWORD"]);
 const b64e = (s) => Buffer.from(String(s ?? ""), "utf8").toString("base64");
 const normalizeDebugLevel = (v) =>
   (v === 1 || v === "1" || String(v).toLowerCase() === "debug") ? "1" : "0";
