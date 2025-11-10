@@ -5,6 +5,29 @@ const { parseTupleRows } = require("../utils/query");
 const { actionStore } = require("../state/store");
 const { logFactory } = require("../utils/log");
 
+// FIX: 'postpatchWatcher.js' se helper functions copy kiye
+function pickTag(text, tag) {
+  const m = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, "i").exec(text);
+  return m ? m[1].trim() : null;
+}
+const pickStatusTop = (xml) => pickTag(xml, "Status");
+
+async function getActionStatusXml(bigfixCtx, id) {
+  const { BIGFIX_BASE_URL, BIGFIX_USER, BIGFIX_PASS, httpsAgent } = bigfixCtx;
+  const url = joinUrl(BIGFIX_BASE_URL, `/api/action/${id}/status`);
+  const r = await axios.get(url, {
+    httpsAgent,
+    auth: { username: BIGFIX_USER, password: BIGFIX_PASS },
+    headers: { Accept: "text/xml" },
+    timeout: 60_000,
+    validateStatus: () => true,
+    responseType: "text",
+  });
+  return { ok: r.status >= 200 && r.status < 300, text: String(r.data || "") };
+}
+// (Helper functions end)
+
+
 function attachActionHelpers(app, ctx) {
   const log = logFactory(ctx.DEBUG_LOG);
   const { BIGFIX_BASE_URL, BIGFIX_USER, BIGFIX_PASS, httpsAgent } = ctx.bigfix;
@@ -14,6 +37,42 @@ function attachActionHelpers(app, ctx) {
     log(req, "GET /api/actions/last →", actionStore.lastActionId);
     res.json({ actionId: actionStore.lastActionId });
   });
+
+  // FIX: Naya route action status aur mail status check karne ke liye
+  app.get("/api/actions/:id/status", async (req, res) => {
+    req._logStart = Date.now();
+    const { id } = req.params;
+    log(req, "GET /api/actions/:id/status id=", id);
+    
+    try {
+      if (!id || id === "null" || id === "undefined") {
+         return res.status(400).json({ ok: false, state: "Invalid ID", mailSent: false });
+      }
+      
+      const { ok, text } = await getActionStatusXml(ctx.bigfix, id);
+      if (!ok) {
+        log(req, "BF GET status error:", text);
+        // Agar action BigFix se delete ho gaya hai, toh use complete maanein
+        if (String(text).toLowerCase().includes("id not found")) {
+            return res.json({ ok: true, state: "expired", mailSent: true });
+        }
+        return res.status(500).json({ ok: false, state: "Error", mailSent: false });
+      }
+
+      const state = (pickStatusTop(text) || "Unknown").toLowerCase();
+      log(req, "Action state:", state);
+
+      // Backend ke 'actionStore' se check karein ki mail gaya ya nahi
+      const mailSent = actionStore.actions[id]?.postMailSent || false;
+
+      // Agar action 'expired' hai YA mail 'sent' hai, toh hum 'mailSent' ko true bhejenge
+      res.json({ ok: true, state, mailSent: state === 'expired' || mailSent });
+    } catch (err) {
+      log(req, "Action status error:", err?.message || err);
+      res.status(500).json({ ok: false, error: String(err?.message || err), mailSent: false });
+    }
+  });
+
 
   app.get("/api/actions/:id/results", async (req, res) => {
     req._logStart = Date.now();
