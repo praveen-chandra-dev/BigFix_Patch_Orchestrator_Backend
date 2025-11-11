@@ -1,8 +1,8 @@
 // backend/src/services/logger.js
 const winston = require('winston');
 const DailyRotateFile = require('winston-daily-rotate-file');
-const path = require('path');
-const fs = require('fs');
+const path = require('node:path');
+const fs = require('node:fs');
 const { getCfg } = require('../env'); // To read DEBUG_LOG
 
 // Ensure logs directory exists in the backend root

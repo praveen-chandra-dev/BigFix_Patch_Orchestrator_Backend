@@ -1,5 +1,5 @@
 // src/routes/snValidate.js
-const https = require("https");
+const https = require("node:https");
 const axios = require("axios");
 const { logFactory } = require("../utils/log");
 

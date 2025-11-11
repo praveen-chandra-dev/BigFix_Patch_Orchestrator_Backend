@@ -1,5 +1,5 @@
 // src/env.js
-const fs = require("fs");
+const fs = require("node:fs");
 const path = require("path");
 const https = require("https"); // FIX: "httpsS" se "https" kar diya hai
 const os = require("os");

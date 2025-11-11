@@ -1,7 +1,7 @@
 // src/envManage.js
-const fs = require("fs");
-const path = require("path");
-const os = require("os");
+const fs = require("node:fs");
+const path = require("node:path");
+const os = require("node:os");
 
 function envPath() {
   return path.resolve(process.cwd(), ".env");

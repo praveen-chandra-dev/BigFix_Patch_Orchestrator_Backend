@@ -1,4 +1,4 @@
-const crypto = require('crypto');
+const crypto = require('node:crypto');
 
 const ALGO = 'PBKDF2-SHA256';
 const ITER = 150000;         // solid default
