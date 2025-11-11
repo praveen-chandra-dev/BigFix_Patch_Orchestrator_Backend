@@ -1,0 +1,15 @@
+{
+    "keep": {
+        "days": true,
+        "amount": 14
+    },
+    "auditLog": "C:\\Users\\praveen.chandra\\Documents\\create-react\\bigfix-backend\\logs\\.e17776156d473ce87dcaaca95ab371b163d1ea78-audit.json",
+    "files": [
+        {
+            "date": 1762805144269,
+            "name": "C:\\Users\\praveen.chandra\\Documents\\create-react\\bigfix-backend\\logs\\app-2025-11-11.log",
+            "hash": "63d7c6c3b4821167407c6030cbfa8173de73576528b766999052066d3774a792"
+        }
+    ],
+    "hashType": "sha256"
+}

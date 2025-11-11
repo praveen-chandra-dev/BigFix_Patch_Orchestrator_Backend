@@ -1,9 +1,10 @@
 // src/services/postpatchWatcher.js
 const axios = require("axios");
-const { actionStore, CONFIG } = require("../state/store");
+const { actionStore, CONFIG } = require("../state/store"); // <-- Reads from CONFIG
 const { joinUrl } = require("../utils/http");
 const { collectStrings, parseTupleRows } = require("../utils/query");
 const { sendPostPatchMail } = require("../mail/transport");
+const { sql, getPool } = require("../db/mssql"); // <-- NEW: Import SQL helpers
 
 /* -------------------- tiny XML helpers -------------------- */
 function pickTag(text, tag) {
@@ -19,8 +20,6 @@ function parseComputerTimes(xml) {
 }
 
 /* -------- parse details back from stored Action XML -------- */
-// FIX: Is function ki ab zaroorat nahi hai group info ke liye,
-// lekin baaki details (sitename, fixletId) ke liye rakhenge.
 function parseActionXml(xml) {
   const sitename = pickTag(xml, "Sitename");
   const fixletId = pickTag(xml, "FixletID");
@@ -54,8 +53,6 @@ async function getActionStatusXml(bigfixCtx, id) {
   return { ok: r.status >= 200 && r.status < 300, text: String(r.data || "") };
 }
 
-// FIX: 'resolveGroupInfo' function ab use nahi ho raha hai,
-// kyunki hum stored info use kar rahe hain.
 
 /**
  * NEW: Fetches full action results using relevance from actionHelpers.js
@@ -130,16 +127,104 @@ function toResultsCSV(data) {
 
 /* ------------------- single-send guards ------------------- */
 function shouldSend(entry) {
+  // NEW: Read from dynamic CONFIG object
   if (!CONFIG.postPatchMail) return false;
   if (!entry) return false;
   if (entry.postMailSent) return false;
   return true;
 }
-function markSent(id) {
-  if (actionStore.actions[id]) actionStore.actions[id].postMailSent = true;
+
+/**
+ * NEW: Mark as sent in both cache and database
+ */
+async function markSent(id) {
+  // 1. Update cache (the in-memory "app data folder")
+  if (actionStore.actions[id]) {
+    actionStore.actions[id].postMailSent = true;
+  }
+  
+  // 2. Update Database
+  try {
+    const pool = await getPool();
+    await pool.request()
+      .input('ActionID', sql.Int, Number(id))
+      .query('UPDATE dbo.ActionHistory SET PostMailSent = 1 WHERE ActionID = @ActionID');
+    console.log(`[postpatch] Marked action ${id} as sent in DB.`);
+  } catch (dbErr) {
+    console.warn(`[postpatch] FAILED to mark action ${id} in DB:`, dbErr.message);
+  }
 }
 
 /* ---------------------- watcher loop ---------------------- */
+
+/**
+ * NEW: Load all non-completed actions from DB into the in-memory cache
+ */
+async function loadCacheFromDb() {
+  let count = 0;
+  try {
+    const pool = await getPool();
+    const rs = await pool.request()
+      .query('SELECT ActionID, Metadata, PostMailSent FROM dbo.ActionHistory WHERE PostMailSent = 0');
+    
+    for (const row of rs.recordset) {
+      try {
+        const metadata = JSON.parse(row.Metadata);
+        // Ensure cache entry has the *correct* DB state
+        actionStore.actions[row.ActionID] = {
+          ...metadata,
+          postMailSent: row.PostMailSent, // This will be `false` based on the query
+        };
+        count++;
+      } catch (parseErr) {
+        console.warn(`[postpatch] Failed to parse metadata for ActionID ${row.ActionID}:`, parseErr.message);
+      }
+    }
+    if (count > 0) {
+      console.log(`[postpatch] Loaded ${count} pending actions from DB into cache.`);
+    } else {
+      console.log(`[postpatch] No pending actions found in DB.`);
+    }
+  } catch (dbErr) {
+    console.error('[postpatch] CRITICAL: Failed to load action history from DB:', dbErr.message);
+    console.error('[postpatch] This may be because the dbo.ActionHistory table does not exist. Please run the SQL script.');
+  }
+}
+
+/**
+ * NEW: Auto-cleanup old, completed actions from the database
+ */
+async function cleanupOldActions() {
+  // NEW: Read retention days from the dynamic CONFIG
+  const retentionDays = Number(CONFIG.postpatchRetentionDays || 30);
+  if (retentionDays <= 0) {
+    // A value of 0 means "keep forever"
+    console.log(`[postpatch] Cleanup: Retention is set to ${retentionDays} days, skipping cleanup.`);
+    return;
+  }
+
+  try {
+    const pool = await getPool();
+    const result = await pool.request()
+      .input('RetentionDays', sql.Int, retentionDays)
+      .query(`
+        DELETE FROM dbo.ActionHistory 
+        WHERE PostMailSent = 1 
+        AND CreatedAt < DATEADD(day, -@RetentionDays, SYSUTCDATETIME())
+      `);
+    
+    const rowsAffected = result.rowsAffected ? result.rowsAffected[0] : 0;
+    if (rowsAffected > 0) {
+      console.log(`[postpatch] Cleanup: Deleted ${rowsAffected} completed actions older than ${retentionDays} days.`);
+    } else {
+      console.log(`[postpatch] Cleanup: No completed actions found older than ${retentionDays} days.`);
+    }
+  } catch (dbErr) {
+    console.warn(`[postpatch] Cleanup failed:`, dbErr.message);
+  }
+}
+
+
 function startPostPatchWatcher(ctx, { intervalMs = 60_000 } = {}) {
   const safeLog = (...a) => { try { console.log(...a); } catch {} };
 
@@ -197,7 +282,7 @@ function startPostPatchWatcher(ctx, { intervalMs = 60_000 } = {}) {
         });
 
         // mark FIRST, then log
-        markSent(id);
+        await markSent(id); // <-- NEW: Now an async function
         safeLog(`[postpatch] mailed once for action ${id} (Expired) with ${resultRows.length} results.`);
       }
     } catch (e) {
@@ -206,9 +291,21 @@ function startPostPatchWatcher(ctx, { intervalMs = 60_000 } = {}) {
     }
   };
 
-  const handle = setInterval(tick, Math.max(10_000, Number(intervalMs) || 60_000));
-  safeLog(`[postpatch] Watcher service started. Polling every ${intervalMs}ms.`);
-  return () => clearInterval(handle);
+  // --- NEW: Load cache from DB on startup ---
+  // We wait for the initial load to complete before starting the timer
+  loadCacheFromDb().finally(() => {
+    // Start polling *after* initial load finishes (or fails)
+    const handle = setInterval(tick, Math.max(10_000, Number(intervalMs) || 60_000));
+    safeLog(`[postpatch] Watcher service started. Polling every ${intervalMs}ms.`);
+    
+    // --- NEW: Run cleanup once on start, then hourly ---
+    const cleanupIntervalMs = 3_600_000; // 1 hour
+    cleanupOldActions(); // Run once on start
+    setInterval(cleanupOldActions, cleanupIntervalMs);
+    safeLog(`[postpatch] Cleanup service started. Running every ${cleanupIntervalMs}ms.`);
+    // ----------------------------------------------------
+  });
+  // ------------------------------------------
 }
 
 module.exports = { startPostPatchWatcher };

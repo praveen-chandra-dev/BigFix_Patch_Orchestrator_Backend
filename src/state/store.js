@@ -1,5 +1,4 @@
-// src/state/store.js
-// In-memory stores/config used by multiple routes
+// backend/src/state/store.js
 
 const actionStore = {
   lastActionId: null,
@@ -8,8 +7,8 @@ const actionStore = {
 };
 
 const CONFIG = {
-  cpuThresholdPct: 85,
-  ramThresholdPct: 85,
+  // - cpuThresholdPct: 85, // REMOVED
+  // - ramThresholdPct: 85, // REMOVED
   diskThresholdGB: 10,
   requireChg: true,
   autoMail: false,        // pre-patch

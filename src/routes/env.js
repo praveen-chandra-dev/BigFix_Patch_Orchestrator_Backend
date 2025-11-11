@@ -3,6 +3,9 @@ const express = require("express");
 const router = express.Router();
 
 const { readEnvFile, saveEnvAndReload } = require("../env");
+// --- NEW LOGGER IMPORT ---
+const { updateConsoleLogLevel } = require('../services/logger');
+// --- END NEW ---
 
 /* ----------------------------- mapping & helpers ---------------------------- */
 
@@ -37,8 +40,14 @@ const UI_TO_ENV = {
 
 const SECRET_KEYS = new Set(["BIGFIX_PASS", "SN_PASSWORD", "SMTP_PASSWORD"]);
 const b64e = (s) => Buffer.from(String(s ?? ""), "utf8").toString("base64");
-const normalizeDebugLevel = (v) =>
-  (v === 1 || v === "1" || String(v).toLowerCase() === "debug") ? "1" : "0";
+const normalizeDebugLevel = (v) => {
+  const level = String(v || 'info').toLowerCase();
+  if (level === '1' || level === 'debug') {
+    return '1'; // Standardize to '1' for debug
+  }
+  return '0'; // Standardize to '0' for info
+};
+
 
 function envDictRaw() {
   const items = readEnvFile();
@@ -86,7 +95,11 @@ router.post("/env", express.json({ limit: "1mb" }), async (req, res) => {
     }
 
     // Save to .env and hot-reload runtime (decode secrets for process + clients)
-    const after = saveEnvAndReload(updates);
+    saveEnvAndReload(updates);
+    
+    // --- NEW: Update logger level ---
+    updateConsoleLogLevel();
+    // --- END NEW ---
 
     // respond with raw values as stored in .env (still base64 for secrets)
     res.json({ ok: true, values: envDictRaw() });

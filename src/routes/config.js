@@ -1,4 +1,4 @@
-// src/routes/config.js
+// backend/src/routes/config.js
 const { CONFIG } = require("../state/store");
 const { logFactory } = require("../utils/log");
 
@@ -6,6 +6,7 @@ function attachConfigRoutes(app, ctx) {
   const log = logFactory(ctx.DEBUG_LOG);
 
   app.get("/api/config", (req, res) => {
+    // ... (this route is unchanged) ...
     req._logStart = Date.now();
     log(req, "GET /api/config");
     // return full CONFIG including postPatchMail
@@ -18,6 +19,7 @@ function attachConfigRoutes(app, ctx) {
     try {
       const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : undefined);
       const bool = (v) => {
+        // ... (bool helper is unchanged) ...
         if (v === undefined) return undefined;
         const s = String(v).toLowerCase();
         if (["true","1","yes","on"].includes(s)) return true;
@@ -25,14 +27,14 @@ function attachConfigRoutes(app, ctx) {
         return undefined;
       };
 
-      const cpu = num(req.body?.cpuThresholdPct) ?? num(req.body?.cpuThreshold);
-      const ram = num(req.body?.ramThresholdPct) ?? num(req.body?.ramThreshold);
+      // - const cpu = num(req.body?.cpuThresholdPct) ?? num(req.body?.cpuThreshold); // REMOVED
+      // - const ram = num(req.body?.ramThresholdPct) ?? num(req.body?.ramThreshold); // REMOVED
       const dsk = num(req.body?.diskThresholdGB) ?? num(req.body?.diskThreshold);
 
-      if (cpu === undefined || cpu < 0 || cpu > 100)
-        return res.status(400).json({ ok:false, message:"cpuPct must be 0..100" });
-      if (ram === undefined || ram < 0 || ram > 100)
-        return res.status(400).json({ ok:false, message:"ramPct must be 0..100" });
+      // - if (cpu === undefined || cpu < 0 || cpu > 100) // REMOVED BLOCK
+      // -   return res.status(400).json({ ok:false, message:"cpuPct must be 0..100" });
+      // - if (ram === undefined || ram < 0 || ram > 100) // REMOVED BLOCK
+      // -   return res.status(400).json({ ok:false, message:"ramPct must be 0..100" });
       if (dsk === undefined || dsk < 0)
         return res.status(400).json({ ok:false, message:"diskGB must be >= 0" });
 
@@ -48,8 +50,8 @@ function attachConfigRoutes(app, ctx) {
       if (reportUnit !== undefined && !validUnits.includes(reportUnit))
         return res.status(400).json({ ok:false, message:`lastReportUnit must be one of: ${validUnits.join(", ")}` });
 
-      CONFIG.cpuThresholdPct = cpu;
-      CONFIG.ramThresholdPct = ram;
+      // - CONFIG.cpuThresholdPct = cpu; // REMOVED
+      // - CONFIG.ramThresholdPct = ram; // REMOVED
       CONFIG.diskThresholdGB = dsk;
 
       if (requireChgVal !== undefined) CONFIG.requireChg  = requireChgVal;

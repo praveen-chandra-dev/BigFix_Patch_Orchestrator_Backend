@@ -131,8 +131,6 @@ function attachHealthRoutes(app, ctx) {
 
       const relevance =
         '((value of result (it, bes property "Patch_Orchestrator_Server_Name") | "N/A") ,' +
-        ' (value of result (it, bes property "Patch_Orchestrator_RAM_Utilization") | "N/A"),' +
-        ' (value of result (it, bes property "Patch_Orchestrator_CPU_Utilization") | "N/A") ,' +
         ' (value of result (it, bes property "Patch_Orchestrator_Disk_Space") | "N/A"),' +
         ' (value of result (it, bes property "Patch_Orchestrator_IP_Address") | "N/A"),' +
         ' (last report time of it as string | "N/A"))' +
@@ -173,12 +171,12 @@ function attachHealthRoutes(app, ctx) {
       };
 
       const parsed = tuples.map((parts) => {
-        const [serverStr, ramStr, cpuStr, diskStr, ipStr, lastReportTime] = parts;
+        const [serverStr, diskStr, ipStr, lastReportTime] = parts; // NEW
         const diskPretty = afterEq(diskStr) || "N/A";
         return {
           server: afterEq(serverStr) || "N/A",
-          ramPct: numOrNull(ramStr),
-          cpuPct: numOrNull(cpuStr),
+          // - ramPct: numOrNull(ramStr), // REMOVED
+          // - cpuPct: numOrNull(cpuStr), // REMOVED
           disk: diskPretty,
           diskGB: parseDiskGB(diskPretty),
           ip: afterEq(ipStr) || "N/A",
@@ -187,8 +185,8 @@ function attachHealthRoutes(app, ctx) {
         };
       });
 
-      const RAM_T = Number(CONFIG.ramThresholdPct);
-      const CPU_T = Number(CONFIG.cpuThresholdPct);
+      //const RAM_T = Number(CONFIG.ramThresholdPct);
+      //const CPU_T = Number(CONFIG.cpuThresholdPct);
       const DSK_T = Number(CONFIG.diskThresholdGB);
 
       const { lastReportValue, lastReportUnit } = CONFIG;
@@ -196,15 +194,17 @@ function attachHealthRoutes(app, ctx) {
 
       log(
         req,
-        `Filtering health: CPU > ${CPU_T}%, RAM > ${RAM_T}%, Disk < ${DSK_T}GB, Last Report > ${lastReportValue} ${lastReportUnit}`
+        // - `Filtering health: CPU > ${CPU_T}%, RAM > ${RAM_T}%, Disk < ${DSK_T}GB, Last Report > ${lastReportValue} ${lastReportUnit}` // OLD
+        `Filtering health: Disk < ${DSK_T}GB, Last Report > ${lastReportValue} ${lastReportUnit}` // NEW
       );
 
       const rows = parsed.filter((r) => {
-        const ramBad = r.ramPct != null && r.ramPct >= RAM_T;
-        const cpuBad = r.cpuPct != null && r.cpuPct >= CPU_T;
+        //const ramBad = r.ramPct != null && r.ramPct >= RAM_T;
+        //const cpuBad = r.cpuPct != null && r.cpuPct >= CPU_T;
         const diskBad = r.diskGB != null && r.diskGB <= DSK_T;
         const timeBad = isTimeUnhealthy(r.lastReportTime, thresholdMs);
-        return ramBad || cpuBad || diskBad || timeBad;
+        // - return ramBad || cpuBad || diskBad || timeBad; // OLD
+        return diskBad || timeBad; // NEW
       });
 
       res.json({ ok: true, count: rows.length, rows });
