@@ -14,6 +14,7 @@ const pickStatusTop = (xml) => pickTag(xml, "Status");
 
 async function getActionStatusXml(bigfixCtx, id) {
   const { BIGFIX_BASE_URL, BIGFIX_USER, BIGFIX_PASS, httpsAgent } = bigfixCtx;
+  // This function is now safe because the 'id' is validated by the route handler
   const url = joinUrl(BIGFIX_BASE_URL, `/api/action/${id}/status`);
   const r = await axios.get(url, {
     httpsAgent,
@@ -45,9 +46,13 @@ function attachActionHelpers(app, ctx) {
     log(req, "GET /api/actions/:id/status id=", id);
     
     try {
-      if (!id || id === "null" || id === "undefined") {
+      // --- VULNERABILITY FIX ---
+      // Validate that the ID is strictly numeric to prevent path traversal.
+      if (!id || !/^\d+$/.test(id)) {
+         log(req, "Invalid action id format");
          return res.status(400).json({ ok: false, state: "Invalid ID", mailSent: false });
       }
+      // --- END FIX ---
       
       const { ok, text } = await getActionStatusXml(ctx.bigfix, id);
       if (!ok) {
@@ -80,6 +85,7 @@ function attachActionHelpers(app, ctx) {
       const id = String(req.params.id || "").trim();
       log(req, "GET /api/actions/:id/results id=", id);
 
+      // This validation is correct and prevents path traversal
       if (!/^\d+$/.test(id)) {
         log(req, "Invalid id");
         return res.status(400).json({ error: "Invalid action id" });
