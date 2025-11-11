@@ -1,8 +1,8 @@
 // src/env.js
 const fs = require("node:fs");
-const path = require("path");
-const https = require("https"); // FIX: "httpsS" se "https" kar diya hai
-const os = require("os");
+const path = require("node:path");
+const https = require("node:https"); 
+const os = require("node:os");
 
 /* ---------------- project-root path helpers ---------------- */
 function projectRoot() {
