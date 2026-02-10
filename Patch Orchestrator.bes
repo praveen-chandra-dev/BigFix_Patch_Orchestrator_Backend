@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<BES xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="BES.xsd">
+	<Analysis>
+		<Title>Patch Orchestrator</Title>
+		<Description><![CDATA[&lt;enter a description of the analysis here&gt; ]]></Description>
+		<Relevance>true</Relevance>
+		<Source>Internal</Source>
+		<SourceReleaseDate>2025-10-14</SourceReleaseDate>
+		<MIMEField>
+			<Name>x-fixlet-modification-time</Name>
+			<Value>Tue, 14 Oct 2025 13:53:55 +0000</Value>
+		</MIMEField>
+		<Domain>BESC</Domain>
+		<Property Name="Patch_Orchestrator_Server_Name" ID="1"><![CDATA["Server Name = " & (concatenation ", " of hostname)]]></Property>
+		<Property Name="Patch_Orchestrator_RAM_Utilization" ID="2"><![CDATA["RAM Utilization = " & ((100 * (total amount of ram - free amount of ram) / total amount of ram) as string)]]></Property>
+		<Property Name="Patch_Orchestrator_CPU_Utilization" ID="3"><![CDATA[if windows of operating system then "CPU Utilization = " & (((sum of ( it as floating point ) of ( string values of selects "LoadPercentage from Win32_Processor" of wmis ))/(sum of ( it as floating point ) of (string values of selects "NumberOfProcessors from Win32_ComputerSystem" of wmis))) as string) else "CPU Utilization = " & (it as string) of ((((sum of (it as integer) of ((it as trimmed string) of substrings separated by " " of following texts of substrings "cpu " of lines of file "/proc/stat") whose (it is not "")) - ((it as integer) of (tuple string item 4 of concatenations ", " of (it as trimmed string) of substrings separated by " " of following texts of substrings "cpu " of lines of file "/proc/stat") whose (it is not "")))/(sum of (it as integer) of ((it as trimmed string) of substrings separated by " " of following texts of substrings "cpu " of lines of file "/proc/stat") whose (it is not "")) as floating point)*100)]]></Property>
+		<Property Name="Patch_Orchestrator_Disk_Space" ID="4"><![CDATA[(name of it & " - Size = " & ((free space of it)/1024/1024/1024) as string & " GB") of drives of system folder]]></Property>
+		<Property Name="Patch_Orchestrator_IP_Address" ID="5"><![CDATA["IP Address = " & (concatenation ", "  of (addresses of adapters of network as string))]]></Property>
+	</Analysis>
+</BES>

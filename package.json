@@ -1,0 +1,43 @@
+{
+  "name": "bigfix-backend",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+<<<<<<< HEAD
+    "axios": "^1.13.2",
+=======
+    "axios": "^1.13.1",
+>>>>>>> 7232a5aadbbb46ebe9cfce066ac302e3b39bab03
+    "cookie": "^1.0.2",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+<<<<<<< HEAD
+    "got": "^14.6.2",
+    "https": "^1.0.0",
+    "ldapts": "^8.0.35",
+    "morgan": "^1.10.1",
+    "mssql": "^12.1.0",
+    "nodemailer": "^7.0.10",
+    "selfsigned": "^4.0.0",
+=======
+    "got": "^12.6.1",
+    "https": "^1.0.0",
+    "morgan": "^1.10.1",
+    "mssql": "^12.1.0",
+    "nodemailer": "^7.0.10",
+>>>>>>> 7232a5aadbbb46ebe9cfce066ac302e3b39bab03
+    "tough-cookie": "^6.0.0",
+    "uuid": "^13.0.0",
+    "winston": "^3.18.3",
+    "winston-daily-rotate-file": "^5.0.0"
+  }
+}
