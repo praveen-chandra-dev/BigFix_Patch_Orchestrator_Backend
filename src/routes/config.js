@@ -17,7 +17,6 @@ async function loadConfigFromDB(log) {
         const saved = JSON.parse(res.recordset[0].StateValue);
         // Merge saved config into global CONFIG object
         Object.assign(CONFIG, saved);
-        // FIX: Pass empty object {} as mock request because log() requires req
         if (log) log({}, "Loaded GlobalConfig from DB:", Object.keys(saved));
       } catch (parseErr) {
         if (log) log({}, "Error parsing GlobalConfig JSON:", parseErr.message);
@@ -29,7 +28,6 @@ async function loadConfigFromDB(log) {
 }
 
 // Helper: Save memory config to DB
-// FIX: Added 'req' parameter to pass to log function
 async function saveConfigToDB(newConfig, req, log) {
   try {
     const pool = await getPool();
@@ -49,7 +47,6 @@ async function saveConfigToDB(newConfig, req, log) {
           INSERT (StateKey, StateValue, UpdatedAt) VALUES (@Key, @Value, SYSUTCDATETIME());
       `);
       
-    // FIX: Pass the actual req object (or {} if missing)
     if (log) log(req || {}, "Saved GlobalConfig to DB");
   } catch (e) {
     if (log) log(req || {}, "Failed to save GlobalConfig to DB:", e.message);
@@ -96,9 +93,13 @@ function attachConfigRoutes(app, ctx) {
       const postPatchVal    = bool(req.body?.postPatchMail);
       const checkServiceVal = bool(req.body?.checkServiceStatus ?? req.body?.checkService); 
       
-      // --- NEW: Handle Snapshot/Clone Flags ---
+      // --- Handle Snapshot/Clone Flags ---
       const snapshotVal = bool(req.body?.snapshotVM);
       const cloneVal    = bool(req.body?.cloneVM);
+
+      // --- NEW: Handle Sandbox/Pilot Toggle Flags ---
+      const enableSandboxVal = bool(req.body?.enableSandbox);
+      const enablePilotVal   = bool(req.body?.enablePilot);
 
       const reportValue = num(req.body?.lastReportValue);
       const reportUnit  = req.body?.lastReportUnit;
@@ -120,16 +121,19 @@ function attachConfigRoutes(app, ctx) {
       if (snapshotVal !== undefined) CONFIG.snapshotVM = snapshotVal;
       if (cloneVal !== undefined)    CONFIG.cloneVM = cloneVal;
 
+      // --- NEW: Update Sandbox/Pilot Config ---
+      if (enableSandboxVal !== undefined) CONFIG.enableSandbox = enableSandboxVal;
+      if (enablePilotVal !== undefined)   CONFIG.enablePilot = enablePilotVal;
+
       if (reportValue !== undefined) CONFIG.lastReportValue = reportValue;
       if (reportUnit  !== undefined) CONFIG.lastReportUnit  = reportUnit;
 
-      // --- PERSIST TO DB (FIXED) ---
-      // Pass 'req' so the logger works
+      // --- PERSIST TO DB ---
       await saveConfigToDB(CONFIG, req, log);
 
       res.json({ ok: true, config: { ...CONFIG } });
     } catch (e) {
-      log(req, "Config Save Error:", e.message); // Log the error properly
+      log(req, "Config Save Error:", e.message); 
       res.status(400).json({ ok:false, message:e?.message || "Bad request" });
     }
   });

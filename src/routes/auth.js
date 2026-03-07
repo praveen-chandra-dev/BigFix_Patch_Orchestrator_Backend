@@ -20,7 +20,6 @@ function getSystemStateKey(userId) {
 }
 
 // --- HELPER: Ensure System Users Exist & Are Valid (Self-Healing) ---
-// FIX: Uses MERGE to Insert if missing, OR Update if exists (fixing NULLs/Names)
 async function ensureSystemUser(id, role, name) {
     try {
         const pool = await getPool();
@@ -45,7 +44,6 @@ async function ensureSystemUser(id, role, name) {
                     INSERT (UserID, LoginName, Role, PasswordHash, PasswordSalt, HashAlgorithm, CreatedAt, UpdatedAt) 
                     VALUES (Source.UserID, Source.LoginName, Source.Role, 'SYSTEM_USER', 'SYSTEM_SALT', 'PBKDF2', SYSUTCDATETIME(), SYSUTCDATETIME());
             `);
-        // console.log(`[Auth] Ensured system user ${id} (${name}) is valid.`);
     } catch (e) {
         console.warn(`[Auth] Failed to ensure system user ${id}:`, e.message);
     }
@@ -62,6 +60,7 @@ function isAdmin(req) {
   }
 }
 
+// --- 1. SETUP CHECK ---
 router.get('/api/auth/setup-required', async (req, res) => {
   try {
     const pool = await getPool();
@@ -72,6 +71,7 @@ router.get('/api/auth/setup-required', async (req, res) => {
   }
 });
 
+// --- 2. LOCAL SIGNUP (For Initial Admin or Local Users) ---
 router.post('/api/auth/signup', async (req, res) => {
   try {
     const { username, password, role } = req.body || {};
@@ -81,9 +81,11 @@ router.post('/api/auth/signup', async (req, res) => {
     const adminCheck = await pool.request().query("SELECT COUNT(*) as Count FROM dbo.USERS WHERE Role = 'Admin'");
     
     let finalRole = 'Windows';
+    // First user becomes Admin automatically
     if (adminCheck.recordset[0].Count === 0) {
       finalRole = 'Admin';
     } else {
+      // Subsequent signups require Admin privileges
       if (!isAdmin(req)) return res.status(403).json({ ok: false, error: 'forbidden' });
       finalRole = ['Admin', 'Windows', 'Linux', 'EUC'].includes(role) ? role : 'Windows';
     }
@@ -115,6 +117,7 @@ router.post('/api/auth/signup', async (req, res) => {
   }
 });
 
+// --- 3. LOGIN (Strict: Must Exist in DB) ---
 router.post('/api/auth/login', async (req, res) => {
   try {
     const { username, password } = req.body || {};
@@ -122,10 +125,10 @@ router.post('/api/auth/login', async (req, res) => {
 
     const pool = await getPool();
 
-    // 1. LDAP Check
+    // A. LDAP Check
     const isLdapOk = await authenticateLDAP(username, password);
     
-    // 2. DB Check
+    // B. DB Check (Get User Record)
     const rs = await pool.request().input('LoginName', sql.NVarChar(128), username).query('SELECT TOP 1 UserID, LoginName, PasswordHash, PasswordSalt, Role FROM dbo.USERS WHERE LoginName=@LoginName');
     let userRecord = rs.recordset[0];
     let authenticated = false;
@@ -134,9 +137,16 @@ router.post('/api/auth/login', async (req, res) => {
         if (userRecord) {
             authenticated = true;
         } else {
-            return res.json({ ok: false, error: 'role_required', message: 'First time login. Please select a role.', username });
+            // FIX: If LDAP is valid but user NOT in DB, deny access.
+            // Admin must add the user first.
+            return res.status(403).json({ 
+                ok: false, 
+                error: 'access_denied', 
+                message: 'Account not authorized. Please contact an Administrator to add your account.' 
+            });
         }
     } else {
+        // Fallback to local password check (for local admins/users)
         if (userRecord) {
              if (verifyPassword(password, userRecord.PasswordSalt, userRecord.PasswordHash)) authenticated = true;
         }
@@ -146,8 +156,7 @@ router.post('/api/auth/login', async (req, res) => {
 
     const role = userRecord.Role || 'Windows';
     
-    // FIX: HEAL ALL SYSTEM USERS ON LOGIN
-    // This ensures consistency across 9002, 9003, and 9004 regardless of who logs in
+    // HEAL SYSTEM USERS ON LOGIN (Ensures consistency)
     if (role === 'Windows' || role === 'Admin') await ensureSystemUser(9002, 'Windows', 'System_Windows');
     if (role === 'Linux' || role === 'Admin') await ensureSystemUser(9003, 'Linux', 'System_Linux');
     if (role === 'EUC' || role === 'Admin') await ensureSystemUser(9004, 'EUC', 'System_EUC');
@@ -161,20 +170,26 @@ router.post('/api/auth/login', async (req, res) => {
   }
 });
 
-router.post('/api/auth/ldap-first-login', async (req, res) => {
+// --- 4. ADMIN: ADD LDAP USER (New Route) ---
+router.post('/api/auth/admin/add-user', async (req, res) => {
     try {
-        const { username, password, role } = req.body || {};
-        if (!username || !password || !role) return res.status(400).json({ ok: false, error: 'bad_request' });
-        
-        if (!['Windows', 'Linux', 'EUC'].includes(role)) return res.status(400).json({ ok: false, error: 'invalid_role' });
+        // 1. Verify Admin
+        if (!isAdmin(req)) return res.status(403).json({ ok: false, error: 'forbidden' });
 
-        const isLdapOk = await authenticateLDAP(username, password);
-        if (!isLdapOk) return res.status(401).json({ ok: false, error: 'auth_failed' });
+        const { username, role } = req.body;
+        if (!username || !role) return res.status(400).json({ ok: false, error: 'bad_request', message: 'Username and Role required' });
+        
+        if (!['Admin', 'Windows', 'Linux', 'EUC'].includes(role)) {
+            return res.status(400).json({ ok: false, error: 'invalid_role' });
+        }
 
         const pool = await getPool();
-        const check = await pool.request().input('U', sql.NVarChar(128), username).query("SELECT 1 FROM dbo.USERS WHERE LoginName = @U");
-        if (check.recordset.length > 0) return res.status(409).json({ ok: false, message: 'User already exists.' });
 
+        // 2. Check Exists
+        const exists = await pool.request().input('LoginName', sql.NVarChar(128), username).query('SELECT 1 FROM dbo.USERS WHERE LoginName=@LoginName');
+        if (exists.recordset.length) return res.status(409).json({ ok:false, error:'user_exists', message: 'User already exists' });
+
+        // 3. Generate ID
         const gapRes = await pool.request().query(`SELECT MIN(t1.UserID + 1) AS NextID FROM dbo.USERS t1 LEFT JOIN dbo.USERS t2 ON t1.UserID + 1 = t2.UserID WHERE t2.UserID IS NULL AND t1.UserID < 9000`);
         let nextId = gapRes.recordset[0].NextID;
         if (!nextId) {
@@ -182,24 +197,19 @@ router.post('/api/auth/ldap-first-login', async (req, res) => {
              nextId = (maxRes.recordset[0].MaxID || 0) + 1;
         }
 
-        const hp = hashPassword(password);
+        // 4. Insert User (Mark as LDAP managed via dummy hash)
         await pool.request()
             .input('UserID', sql.Int, nextId)
             .input('LoginName', sql.NVarChar(128), username)
-            .input('PasswordHash', sql.NVarChar(128), hp.hash)
-            .input('PasswordSalt', sql.NVarChar(128), hp.salt)
-            .input('HashAlgorithm', sql.NVarChar(12), HASH_ALGORITHM)
             .input('Role', sql.NVarChar(20), role)
-            .query(`INSERT INTO dbo.USERS (UserID, LoginName, PasswordHash, PasswordSalt, HashAlgorithm, Role, CreatedAt, UpdatedAt) VALUES (@UserID, @LoginName, @PasswordHash, @PasswordSalt, @HashAlgorithm, @Role, SYSUTCDATETIME(), SYSUTCDATETIME())`);
+            .query(`
+                INSERT INTO dbo.USERS 
+                (UserID, LoginName, Role, PasswordHash, PasswordSalt, HashAlgorithm, CreatedAt, UpdatedAt) 
+                VALUES 
+                (@UserID, @LoginName, @Role, 'LDAP_AUTH', 'LDAP_AUTH', 'NONE', SYSUTCDATETIME(), SYSUTCDATETIME())
+            `);
 
-        // FIX: Heal System Users Here Too
-        if (role === 'Windows') await ensureSystemUser(9002, 'Windows', 'System_Windows');
-        if (role === 'Linux') await ensureSystemUser(9003, 'Linux', 'System_Linux');
-        if (role === 'EUC') await ensureSystemUser(9004, 'EUC', 'System_EUC');
-
-        const sessionData = { userId: nextId, username, role };
-        res.cookie('auth_session', JSON.stringify(sessionData), { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax' });
-        res.json({ ok: true, userId: nextId, username, role });
+        res.json({ ok: true, message: `User ${username} added successfully with role ${role}.` });
 
     } catch (e) {
         res.status(500).json({ ok: false, error: 'server_error', message: e.message });
@@ -221,7 +231,7 @@ router.get('/api/auth/status', (req, res) => {
   return res.json({ ok: false, authed: false });
 });
 
-// --- UPDATED GET STATE (Auto-Creates Missing SystemState) ---
+// --- UPDATED GET STATE ---
 router.get('/api/auth/state/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
@@ -230,23 +240,20 @@ router.get('/api/auth/state/:userId', async (req, res) => {
     let rawState = null;
 
     if (systemKey) {
-      // 1. Try to fetch Shared State
       const rs = await pool.request()
         .input('Key', sql.NVarChar(50), systemKey)
         .query("SELECT StateValue FROM dbo.SystemState WHERE StateKey = @Key");
       
       if (rs.recordset.length > 0) {
         rawState = rs.recordset[0].StateValue;
-        if (!rawState) rawState = "{}"; // FIX: Handle explicit NULL in DB
+        if (!rawState) rawState = "{}";
       } else {
-        // FIX: Row missing? CREATE IT immediately.
         await pool.request()
           .input('Key', sql.NVarChar(50), systemKey)
           .query("INSERT INTO dbo.SystemState (StateKey, StateValue) VALUES (@Key, '{}')");
         rawState = "{}";
       }
     } else {
-      // 2. Individual User State
       const rs = await pool.request()
         .input('UID', sql.Int, userId)
         .query("SELECT AppState FROM dbo.USERS WHERE UserID = @UID");
@@ -262,7 +269,7 @@ router.get('/api/auth/state/:userId', async (req, res) => {
   }
 });
 
-// --- UPDATED POST STATE (Robust Update) ---
+// --- UPDATED POST STATE ---
 router.post('/api/auth/state/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
@@ -271,7 +278,6 @@ router.post('/api/auth/state/:userId', async (req, res) => {
     const systemKey = getSystemStateKey(userId);
 
     if (systemKey) {
-      // FIX: Standard Check-then-Update/Insert pattern
       const updateRes = await pool.request()
         .input('Val', sql.NVarChar(sql.MAX), stateStr)
         .input('Key', sql.NVarChar(50), systemKey)
@@ -312,7 +318,6 @@ router.put('/api/auth/users/:id/role', async (req, res) => {
     const { id } = req.params;
     const { role } = req.body;
     
-    // Protected IDs (Windows, Linux, EUC shared IDs)
     if ([9002, 9003, 9004].includes(Number(id))) return res.status(403).json({ ok: false, error: 'forbidden' });
     
     if (!['Admin', 'Windows', 'Linux', 'EUC'].includes(role)) {

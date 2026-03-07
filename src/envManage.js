@@ -1,14 +1,7 @@
-<<<<<<< HEAD
 // src/envManage.js news
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
-=======
-// src/envManage.js
-const fs = require("node:fs");
-const path = require("node:path");
-const os = require("node:os");
->>>>>>> 7232a5aadbbb46ebe9cfce066ac302e3b39bab03
 
 function envPath() {
   return path.resolve(process.cwd(), ".env");

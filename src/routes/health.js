@@ -67,7 +67,7 @@ function attachHealthRoutes(app, ctx) {
     else if (userRole === 'EUC') {
         // FIX: EUC Role - Strictly filter out Servers based on OS name
         // This ensures counts aren't inflated by Windows Servers
-        return ` whose (operating system of it as lowercase does not contain "server")`;
+        return ` whose (value of result (it, bes property "Device Type") as lowercase != "server")`;
     }
     return ""; // Admin sees all
   }
