@@ -56,12 +56,9 @@ function buildApp() {
   app.use(express.json({ limit: "1mb" }));
   app.use(cookieParser());
 
-  // --- API ROUTES ---
+  // --- EXISTING API ROUTES ---
   app.use(require("./routes/auth"));
   app.use(require("./routes/calendar")); 
-  
-  // --- NEW: Predict Route (FIXED) ---
-  // This line was missing or not saved, causing the 404 error
   app.use(require("./routes/predict")); 
 
   const envRouterPath = require.resolve("./routes/env");
@@ -80,6 +77,18 @@ function buildApp() {
   attachFlexible(app, ctx, "./routes/groups", "attachGroupRoutes");
   attachFlexible(app, ctx, "./routes/vcenter",        "attachVcenterRoutes");
 
+  // --- NEW: RISK PRIORITIZATION API ROUTES ---
+  const patchRouter = tryRequire("./routes/patches");
+  const cveRouter = tryRequire("./routes/cves");
+  const sitesRouter = tryRequire("./routes/sites");
+  const riskBaselinesRouter = tryRequire("./routes/riskBaselines");
+  
+  if (patchRouter) app.use("/api/patches", patchRouter);
+  if (cveRouter) app.use("/api/cves", cveRouter);
+  if (sitesRouter) app.use("/api/sites", sitesRouter);
+  if (riskBaselinesRouter) app.use("/api/baselines", riskBaselinesRouter);
+
+  // --- UI SERVING ---
   app.get('/env.js', (req, res) => {
       const jsContent = `window.env = { VITE_API_BASE: window.location.origin };`;
       res.type('application/javascript').send(jsContent);
