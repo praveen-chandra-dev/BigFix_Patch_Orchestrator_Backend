@@ -4,40 +4,50 @@ const { getCache, setCache } = require("../services/prismCache");
 
 const router = express.Router();
 
+const CACHE_KEY = "patches";
+
 router.get("/", async (req, res) => {
+
   try {
 
-    const cacheKey = "patches";
+    /* =========================
+       CHECK CACHE
+    ========================= */
 
-    // ----------------------------
-    // Check cache first
-    // ----------------------------
-    const cached = getCache(cacheKey);
+    const cached = getCache(CACHE_KEY);
+
     if (cached) {
       return res.json(cached);
     }
 
-    // ----------------------------
-    // Fetch patches from PRISM
-    // ----------------------------
+    /* =========================
+       FETCH FROM PRISM
+    ========================= */
+
+    console.log("[PATCHES] Cache miss → fetching from Prism");
+
     const patches = await getPatches();
 
-    // ----------------------------
-    // Store in cache
-    // ----------------------------
-    setCache(cacheKey, patches);
+    /* =========================
+       STORE CACHE
+    ========================= */
+
+    if (Array.isArray(patches) && patches.length > 0) {
+      setCache(CACHE_KEY, patches);
+    }
 
     res.json(patches);
 
   } catch (err) {
 
-    console.error("Patch fetch failed:", err.message);
+    console.error("[PATCHES] Fetch failed:", err.message);
 
     res.status(500).json({
       error: "Failed to fetch patches"
     });
 
   }
+
 });
 
 module.exports = router;
