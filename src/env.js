@@ -1,7 +1,7 @@
 // src/env.js
 const fs = require("fs");
 const path = require("path");
-const https = require("https"); 
+const https = require("https");
 const os = require("os");
 
 function projectRoot() { return process.cwd(); }
@@ -42,12 +42,12 @@ function toEnvContent(dict, order = []) {
 /* ---------------- keys we persist to .env ---------------- */
 const UI_KEYS = new Set([
   "PORT",
-  "BIGFIX_ALLOW_SELF_SIGNED","BIGFIX_BASE_URL","BIGFIX_USER","BIGFIX_PASS",
-  "SN_ALLOW_SELF_SIGNED","SN_URL","SN_USER","SN_PASSWORD",
+  "BIGFIX_ALLOW_SELF_SIGNED", "BIGFIX_BASE_URL", "BIGFIX_USER", "BIGFIX_PASS",
+  "SN_ALLOW_SELF_SIGNED", "SN_URL", "SN_USER", "SN_PASSWORD",
   "VCENTER_URL", "VCENTER_USER", "VCENTER_PASSWORD", "VCENTER_ALLOW_SELF_SIGNED",
-  "SMTP_ALLOW_SELF_SIGNED","SMTP_HOST","SMTP_PORT","SMTP_SECURE",
-  "SMTP_FROM","SMTP_TO","SMTP_CC","SMTP_BCC",
-  "SMTP_USER","SMTP_PASSWORD",
+  "SMTP_ALLOW_SELF_SIGNED", "SMTP_HOST", "SMTP_PORT", "SMTP_SECURE",
+  "SMTP_FROM", "SMTP_TO", "SMTP_CC", "SMTP_BCC",
+  "SMTP_USER", "SMTP_PASSWORD",
   "LDAP_ENABLED", "LDAP_URL", "LDAP_DOMAIN", "LDAP_ALLOW_SELF_SIGNED", // <--- LDAP Keys
   "DEBUG_LOG",
 ]);
@@ -65,7 +65,7 @@ function writeEnvFull(fullDict) {
 
 /* ---------------- runtime cfg + ctx ---------------- */
 const SECRET_KEYS = new Set([
-    "BIGFIX_PASS", "SN_PASSWORD", "SMTP_PASSWORD", "SQL_SERVER_AUTHENTICATION_PASSWORD", "VCENTER_PASSWORD"
+  "BIGFIX_PASS", "SN_PASSWORD", "SMTP_PASSWORD", "SQL_SERVER_AUTHENTICATION_PASSWORD", "VCENTER_PASSWORD", "PRISM_PASS"
 ]);
 
 function b64d(val) {
@@ -114,6 +114,10 @@ function buildCfg(dictRaw) {
     BIGFIX_PASS: decoded.BIGFIX_PASS || "",
     BIGFIX_ALLOW_SELF_SIGNED: bool(decoded.BIGFIX_ALLOW_SELF_SIGNED, false),
 
+    PRISM_BASE_URL: decoded.PRISM_BASE_URL || "",
+    PRISM_USER: decoded.PRISM_USER || "",
+    PRISM_PASS: decoded.PRISM_PASS || "",
+
     SN_URL: decoded.SN_URL || "",
     SN_USER: decoded.SN_USER || "",
     SN_PASSWORD: decoded.SN_PASSWORD || "",
@@ -142,7 +146,7 @@ function buildCfg(dictRaw) {
     SMTP_ALLOW_SELF_SIGNED: bool(decoded.SMTP_ALLOW_SELF_SIGNED, false),
 
     DEBUG_LOG: decoded.DEBUG_LOG || "0",
-    
+
     SQL_SERVER_AUTHENTICATION_USERNAME: decoded.SQL_SERVER_AUTHENTICATION_USERNAME || "",
     SQL_SERVER_AUTHENTICATION_PASSWORD: decoded.SQL_SERVER_AUTHENTICATION_PASSWORD || "",
     SQL_SERVER: decoded.SQL_SERVER || "",
@@ -165,21 +169,28 @@ function buildCfg(dictRaw) {
       SN_URL: cfg.SN_URL, SN_USER: cfg.SN_USER, SN_PASSWORD: cfg.SN_PASSWORD,
       SN_ALLOW_SELF_SIGNED: cfg.SN_ALLOW_SELF_SIGNED,
     },
+
+    prism: {
+      PRISM_BASE_URL: cfg.PRISM_BASE_URL,
+      PRISM_USER: cfg.PRISM_USER,
+      PRISM_PASS: cfg.PRISM_PASS
+    },
+
     vcenter: {
       VCENTER_URL: cfg.VCENTER_URL,
       VCENTER_USER: cfg.VCENTER_USER,
       VCENTER_PASSWORD: cfg.VCENTER_PASSWORD,
       VCENTER_ALLOW_SELF_SIGNED: cfg.VCENTER_ALLOW_SELF_SIGNED,
     },
-    ldap: { 
-        LDAP_ENABLED: cfg.LDAP_ENABLED,
-        LDAP_URL: cfg.LDAP_URL,
-        LDAP_DOMAIN: cfg.LDAP_DOMAIN,
-        LDAP_ALLOW_SELF_SIGNED: cfg.LDAP_ALLOW_SELF_SIGNED
+    ldap: {
+      LDAP_ENABLED: cfg.LDAP_ENABLED,
+      LDAP_URL: cfg.LDAP_URL,
+      LDAP_DOMAIN: cfg.LDAP_DOMAIN,
+      LDAP_ALLOW_SELF_SIGNED: cfg.LDAP_ALLOW_SELF_SIGNED
     },
     smtp: {
       SMTP_HOST: cfg.SMTP_HOST, SMTP_PORT: cfg.SMTP_PORT, SMTP_SECURE: cfg.SMTP_SECURE,
-      SMTP_FROM: cfg.SMTP_FROM, SMTP_TO: cfg.SMTP_TO, SMTP_CC: cfg.SMTP_CC, SMTP_BCC: cfg.SMTP_BCC, 
+      SMTP_FROM: cfg.SMTP_FROM, SMTP_TO: cfg.SMTP_TO, SMTP_CC: cfg.SMTP_CC, SMTP_BCC: cfg.SMTP_BCC,
       SMTP_USER: cfg.SMTP_USER, SMTP_PASSWORD: cfg.SMTP_PASSWORD,
       SMTP_ALLOW_SELF_SIGNED: cfg.SMTP_ALLOW_SELF_SIGNED,
     },
