@@ -1,5 +1,6 @@
 const axios = require("axios");
 const https = require("https");
+const { getCtx } = require("../env");
 
 let cachedToken = null;
 let tokenExpiry = null;
@@ -25,11 +26,14 @@ async function getToken(forceRefresh = false) {
     return cachedToken;
   }
   try {
+
+    const ctx = getCtx();
+
     const response = await axios.post(
-      `${process.env.PRISM_BASE_URL}/api/v1/auth/token`,
+      `${ctx.prism.PRISM_BASE_URL}/api/v1/auth/token`,
       {
-        username: process.env.PRISM_USER,
-        password: process.env.PRISM_PASS,
+        username: ctx.prism.PRISM_USER,
+        password: ctx.prism.PRISM_PASS,
       },
       { httpsAgent }
     );
