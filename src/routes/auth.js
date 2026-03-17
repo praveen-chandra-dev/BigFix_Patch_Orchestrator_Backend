@@ -121,7 +121,7 @@ router.post('/api/auth/signup', async (req, res) => {
 router.post('/api/auth/login', async (req, res) => {
   try {
     const { username, password } = req.body || {};
-    if (!username || !password) return res.status(400).json({ ok:false, error:'bad_request' });
+    if (!username || !password) return res.status(400).json({ ok:false, error:'bad_request', message: 'Username and password required.' });
 
     const pool = await getPool();
 
@@ -137,8 +137,6 @@ router.post('/api/auth/login', async (req, res) => {
         if (userRecord) {
             authenticated = true;
         } else {
-            // FIX: If LDAP is valid but user NOT in DB, deny access.
-            // Admin must add the user first.
             return res.status(403).json({ 
                 ok: false, 
                 error: 'access_denied', 
@@ -146,13 +144,21 @@ router.post('/api/auth/login', async (req, res) => {
             });
         }
     } else {
-        // Fallback to local password check (for local admins/users)
-        if (userRecord) {
-             if (verifyPassword(password, userRecord.PasswordSalt, userRecord.PasswordHash)) authenticated = true;
+        // Fallback to local password check
+        if (userRecord && userRecord.PasswordHash && userRecord.PasswordHash !== 'LDAP_AUTH' && userRecord.PasswordHash !== 'SYSTEM_USER') {
+             try {
+                 if (verifyPassword(password, userRecord.PasswordSalt, userRecord.PasswordHash)) {
+                     authenticated = true;
+                 }
+             } catch (err) {
+                 console.warn("[Auth] Fallback password check failed:", err.message);
+             }
         }
     }
 
-    if (!authenticated) return res.status(401).json({ ok:false, error:'invalid', message: 'Invalid username or password.' });
+    if (!authenticated) {
+        return res.status(401).json({ ok:false, error:'invalid', message: 'Invalid username or password.' });
+    }
 
     const role = userRecord.Role || 'Windows';
     
@@ -170,10 +176,9 @@ router.post('/api/auth/login', async (req, res) => {
   }
 });
 
-// --- 4. ADMIN: ADD LDAP USER (New Route) ---
+// --- 4. ADMIN: ADD LDAP USER ---
 router.post('/api/auth/admin/add-user', async (req, res) => {
     try {
-        // 1. Verify Admin
         if (!isAdmin(req)) return res.status(403).json({ ok: false, error: 'forbidden' });
 
         const { username, role } = req.body;
@@ -185,11 +190,9 @@ router.post('/api/auth/admin/add-user', async (req, res) => {
 
         const pool = await getPool();
 
-        // 2. Check Exists
         const exists = await pool.request().input('LoginName', sql.NVarChar(128), username).query('SELECT 1 FROM dbo.USERS WHERE LoginName=@LoginName');
         if (exists.recordset.length) return res.status(409).json({ ok:false, error:'user_exists', message: 'User already exists' });
 
-        // 3. Generate ID
         const gapRes = await pool.request().query(`SELECT MIN(t1.UserID + 1) AS NextID FROM dbo.USERS t1 LEFT JOIN dbo.USERS t2 ON t1.UserID + 1 = t2.UserID WHERE t2.UserID IS NULL AND t1.UserID < 9000`);
         let nextId = gapRes.recordset[0].NextID;
         if (!nextId) {
@@ -197,7 +200,7 @@ router.post('/api/auth/admin/add-user', async (req, res) => {
              nextId = (maxRes.recordset[0].MaxID || 0) + 1;
         }
 
-        // 4. Insert User (Mark as LDAP managed via dummy hash)
+        // Insert User (Mark as LDAP managed via dummy hash)
         await pool.request()
             .input('UserID', sql.Int, nextId)
             .input('LoginName', sql.NVarChar(128), username)
@@ -303,8 +306,11 @@ router.post('/api/auth/state/:userId', async (req, res) => {
   }
 });
 
+// --- LAYER 1 SECURITY FIX: Protect the users route ---
 router.get('/api/auth/users', async (req, res) => {
   try {
+    if (!isAdmin(req)) return res.status(403).json({ ok: false, error: 'forbidden' });
+
     const pool = await getPool();
     const rs = await pool.request().query('SELECT UserID, LoginName, Role, CreatedAt FROM dbo.USERS ORDER BY LoginName');
     res.json({ ok: true, users: rs.recordset });

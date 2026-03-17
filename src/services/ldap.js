@@ -22,17 +22,26 @@ async function authenticateLDAP(username, password) {
   }
   if (!username || !password) return false;
 
-  const isStrict = !cfg.LDAP_ALLOW_SELF_SIGNED;
-  const upn = `${username}@${domain}`;
+  // 3. Evaluate strict mode safely (handles both boolean and string "true"/"false" from .env)
+  const isStrict = String(cfg.LDAP_ALLOW_SELF_SIGNED).toLowerCase() !== 'true';
+  
+  let upn = username;
+  if (!username.includes('@') && !username.includes('\\')) {
+      upn = `${username}@${domain}`;
+  }
 
-  // Configure Client
+  // 4. Build TLS Options dynamically to avoid Node.js "undefined" Type Errors
+  const tlsOpts = { rejectUnauthorized: isStrict };
+  if (!isStrict) {
+      // Only attach this property if NOT strict. 
+      // Attaching 'undefined' causes a hard crash in modern Node.js
+      tlsOpts.checkServerIdentity = () => undefined;
+  }
+
+  // 5. Configure Client
   const client = new Client({
     url: url,
-    tlsOptions: { 
-        rejectUnauthorized: isStrict,
-        // If allowing self-signed, also disable hostname validation to prevent resets
-        checkServerIdentity: isStrict ? undefined : () => undefined 
-    },
+    tlsOptions: tlsOpts,
     strictDN: false, // <--- CRITICAL: Active Directory DNs often violate strict standards
     timeout: 10000,
     connectTimeout: 10000

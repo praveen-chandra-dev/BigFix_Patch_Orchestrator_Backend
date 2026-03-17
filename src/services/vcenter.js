@@ -2,6 +2,10 @@
 const axios = require("axios");
 const https = require("https");
 
+// --- BACKEND IN-MEMORY CACHE ---
+// Remembers IP to VM ID mappings. Drastically speeds up lookups across the whole app.
+const resolveCache = new Map(); 
+
 const vcenterClient = (ctx) => {
   const config = ctx.servicenow || ctx.vcenter || {};
   const VCENTER_URL = ctx.VCENTER_URL || config.VCENTER_URL || process.env.VCENTER_URL;
@@ -44,7 +48,6 @@ const vcenterClient = (ctx) => {
     </soapenv:Envelope>
   `;
 
-  // Strict Tag Extraction
   const extractVal = (xml, tag) => {
     if (!xml) return null;
     const regex = new RegExp(`<(?:\w+:)?${tag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/(?:\\w+:)?${tag}>`, 'i');
@@ -68,7 +71,6 @@ const vcenterClient = (ctx) => {
     }
   };
 
-  // --- AUTH & SESSION ---
   let loginPromise = null;
   async function connectAndLogin() {
     if (loginPromise) return loginPromise;
@@ -115,24 +117,12 @@ const vcenterClient = (ctx) => {
     return loginPromise;
   }
 
-  // --- CLONE HELPERS ---
-
   async function resolveResourcePool(hostId, propertyCollector) {
-    const hostBody = `
-      <urn:RetrieveProperties>
-        <urn:_this type="PropertyCollector">${propertyCollector}</urn:_this>
-        <urn:specSet>
-          <urn:propSet><urn:type>HostSystem</urn:type><urn:pathSet>parent</urn:pathSet></urn:propSet>
-          <urn:objectSet><urn:obj type="HostSystem">${hostId}</urn:obj></urn:objectSet>
-        </urn:specSet>
-      </urn:RetrieveProperties>`;
-    
+    const hostBody = `<urn:RetrieveProperties><urn:_this type="PropertyCollector">${propertyCollector}</urn:_this><urn:specSet><urn:propSet><urn:type>HostSystem</urn:type><urn:pathSet>parent</urn:pathSet></urn:propSet><urn:objectSet><urn:obj type="HostSystem">${hostId}</urn:obj></urn:objectSet></urn:specSet></urn:RetrieveProperties>`;
     const hostRes = await postSoap(hostBody);
     if (hostRes.error) throw new Error("Failed to resolve Host Parent: " + hostRes.error);
 
-    const parentMatch = hostRes.data.match(/<(?:\w+:)?val[^>]*\s+type="([^"]+)"[^>]*>([^<]+)<\//i) || 
-                        hostRes.data.match(/<(?:\w+:)?val[^>]*>([^<]+)<\//i);
-    
+    const parentMatch = hostRes.data.match(/<(?:\w+:)?val[^>]*\s+type="([^"]+)"[^>]*>([^<]+)<\//i) || hostRes.data.match(/<(?:\w+:)?val[^>]*>([^<]+)<\//i);
     if (!parentMatch) throw new Error("Could not find Host Parent in response.");
     
     let parentType, parentId;
@@ -144,31 +134,17 @@ const vcenterClient = (ctx) => {
         throw new Error("Host Parent Type missing in response attributes.");
     }
 
-    const poolBody = `
-      <urn:RetrieveProperties>
-        <urn:_this type="PropertyCollector">${propertyCollector}</urn:_this>
-        <urn:specSet>
-          <urn:propSet><urn:type>${parentType}</urn:type><urn:pathSet>resourcePool</urn:pathSet></urn:propSet>
-          <urn:objectSet><urn:obj type="${parentType}">${parentId}</urn:obj></urn:objectSet>
-        </urn:specSet>
-      </urn:RetrieveProperties>`;
-
+    const poolBody = `<urn:RetrieveProperties><urn:_this type="PropertyCollector">${propertyCollector}</urn:_this><urn:specSet><urn:propSet><urn:type>${parentType}</urn:type><urn:pathSet>resourcePool</urn:pathSet></urn:propSet><urn:objectSet><urn:obj type="${parentType}">${parentId}</urn:obj></urn:objectSet></urn:specSet></urn:RetrieveProperties>`;
     const poolRes = await postSoap(poolBody);
     if (poolRes.error) throw new Error("Failed to resolve Resource Pool: " + poolRes.error);
     
     const poolId = extractVal(poolRes.data, "val");
     if (!poolId || poolId.includes("<")) throw new Error("Resource Pool ID extraction failed.");
-    
     return poolId;
   }
 
   async function getCustomizationSpec(specName, specManagerId) {
-    const body = `
-      <urn:GetCustomizationSpec>
-        <urn:_this type="CustomizationSpecManager">${specManagerId}</urn:_this>
-        <urn:name>${specName}</urn:name>
-      </urn:GetCustomizationSpec>`;
-    
+    const body = `<urn:GetCustomizationSpec><urn:_this type="CustomizationSpecManager">${specManagerId}</urn:_this><urn:name>${specName}</urn:name></urn:GetCustomizationSpec>`;
     const res = await postSoap(body);
     if (res.error) throw new Error(`OS Spec '${specName}' not found or error: ` + res.error);
 
@@ -267,7 +243,6 @@ const vcenterClient = (ctx) => {
     }
   }
 
-  // --- TASKS ---
   async function getTasksStatus(taskIds) {
     if (!taskIds || !taskIds.length) return {};
     try {
@@ -280,15 +255,10 @@ const vcenterClient = (ctx) => {
     } catch (e) { throw e; }
   }
 
-  // FIXED PARSER: Handles namespace variations for Task Info
   const parseTaskStatusResponse = (xml) => {
     const statuses = {};
     if (!xml) return statuses;
-    
-    // Split by object return sets (each task response)
-    // Looking for <objects> or <returnval>
     const chunks = xml.split(/<(?:\w+:)?obj type="Task">/i);
-    
     for (let i = 1; i < chunks.length; i++) {
        const chunk = chunks[i];
        const idMatch = /^([^<]+)<\//.exec(chunk); 
@@ -298,12 +268,9 @@ const vcenterClient = (ctx) => {
        let state = "unknown";
        let error = null;
 
-       // Regex to find info.state value
-       // matches: <name>info.state</name><val ...>success</val>
        const sm = chunk.match(/<(?:\w+:)?name>info\.state<\/(?:\w+:)?name>[\s\S]*?<(?:\w+:)?val[^>]*>([^<]+)<\//i);
        if (sm) state = sm[1];
 
-       // Regex to find info.error localized message
        const em = chunk.match(/<(?:\w+:)?name>info\.error<\/(?:\w+:)?name>[\s\S]*?<(?:\w+:)?localizedMessage>([^<]+)<\//i);
        if (em) error = em[1];
 
@@ -323,11 +290,22 @@ const vcenterClient = (ctx) => {
           for (const rawIp of t.ips) {
             const ip = String(rawIp).trim();
             if (!ip) continue;
+            
+            // IN-MEMORY CACHE CHECK
+            if (resolveCache.has(ip)) {
+                foundId = resolveCache.get(ip);
+                break;
+            }
+
             const soapBody = `<urn:FindByIp><urn:_this type="SearchIndex">${searchIndex}</urn:_this><urn:ip>${ip}</urn:ip><urn:vmSearch>true</urn:vmSearch></urn:FindByIp>`;
             const r = await postSoap(soapBody);
             if (r.error) continue;
             const vmId = extractVal(r.data, "returnval");
-            if (vmId) { foundId = vmId; break; }
+            if (vmId) { 
+                foundId = vmId; 
+                resolveCache.set(ip, vmId); // STORE IN MEMORY
+                break; 
+            }
           }
         }
         if (foundId) resolved.push({ ...t, id: foundId });
