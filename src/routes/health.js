@@ -29,19 +29,6 @@ function isTimeUnhealthy(timeString, thresholdMs) {
   }
 }
 
-function collectStrings(node, out) {
-  if (node == null) return;
-  const t = typeof node;
-  if (t === "string") {
-    const s = node.trim();
-    if (s && !s.startsWith("<")) out.push(s);
-    return;
-  }
-  if (t === "number" || t === "boolean") { out.push(String(node)); return; }
-  if (Array.isArray(node)) { for (const x of node) collectStrings(x, out); return; }
-  if (t === "object") { for (const k of Object.keys(node)) collectStrings(node[k], out); }
-}
-
 // ------------------------------- ROUTES ---------------------------------
 
 function attachHealthRoutes(app, ctx) {
@@ -54,32 +41,45 @@ function attachHealthRoutes(app, ctx) {
     res.json({ ok: true, ts: new Date().toISOString() });
   });
 
-  // --- HELPER: Get Role Filter ---
-  function getRoleFilter(req) {
-    const userRole = req.headers['x-user-role'] || 'Admin';
-    
-    if (userRole === 'Windows') {
-        return ` whose (operating system of it as lowercase contains "win")`;
-    } 
-    else if (userRole === 'Linux') {
-        return ` whose (operating system of it as lowercase does not contain "win")`;
-    } 
-    else if (userRole === 'EUC') {
-        // FIX: EUC Role - Strictly filter out Servers based on OS name
-        // This ensures counts aren't inflated by Windows Servers
-        return ` whose (value of result (it, bes property "Device Type") as lowercase != "server")`;
-    }
-    return ""; // Admin sees all
+  // --- FIX: Extract Base Computers Query (Group Scoping) ---
+  // Returns the correct base relevance object depending on if a group is targeted
+  function getBaseComputers(groupName) {
+      if (groupName) {
+          const safeGroup = String(groupName).replace(/"/g, '""').toLowerCase();
+          return `members of bes computer groups whose (name of it as lowercase = "${safeGroup}")`;
+      }
+      return `bes computers`;
   }
 
-  // --- 1. TOTAL COMPUTERS (Filtered) ---
+  // --- FIX: Extract Role Filter ---
+  function getRoleFilter(req) {
+    const userRole = req.headers['x-user-role'] || 'Admin';
+    let conditions = [];
+
+    if (userRole === 'Windows') {
+        conditions.push(`(operating system of it as lowercase contains "win")`);
+    } else if (userRole === 'Linux') {
+        conditions.push(`(operating system of it as lowercase does not contain "win")`);
+    } else if (userRole === 'EUC') {
+        conditions.push(`(value of result (it, bes property "Device Type") as lowercase != "server")`);
+    }
+
+    if (conditions.length > 0) {
+        return ` whose (${conditions.join(" and ")})`;
+    }
+    return "";
+  }
+
+  // --- 1. TOTAL COMPUTERS ---
   app.get("/api/infra/total-computers", async (req, res) => {
     req._logStart = Date.now();
     try {
-      log(req, "GET /api/infra/total-computers");
+      const { group } = req.query;
+      log(req, `GET /api/infra/total-computers (Group: ${group || 'ALL'})`);
       
+      const baseComp = getBaseComputers(group);
       const filter = getRoleFilter(req);
-      const relevance = `number of bes computers${filter}`;
+      const relevance = `number of ${baseComp}${filter}`;
       
       const url = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(relevance)}`;
       
@@ -114,12 +114,14 @@ function attachHealthRoutes(app, ctx) {
     }
   });
 
-  // ---------------------- CRITICAL HEALTH (Filtered + OS Aware) ----------------------
+  // --- 2. CRITICAL HEALTH ---
   app.get("/api/health/critical", async (req, res) => {
     req._logStart = Date.now();
     try {
-      log(req, "GET /api/health/critical");
+      const { group } = req.query;
+      log(req, `GET /api/health/critical (Group: ${group || 'ALL'})`);
 
+      const baseComp = getBaseComputers(group);
       const filter = getRoleFilter(req);
       const userRole = req.headers['x-user-role'] || 'Admin';
       
@@ -130,7 +132,7 @@ function attachHealthRoutes(app, ctx) {
         ' (last report time of it as string | "N/A"),' + 
         ' (value of result (it, bes property "Patch_Setu_Window_Update_Service") | "N/A"),' +
         ' (operating system of it | "N/A"))' +
-        ` of bes computers${filter}`;
+        ` of ${baseComp}${filter}`;
 
       const url = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(relevance)}`;
       
@@ -178,8 +180,6 @@ function attachHealthRoutes(app, ctx) {
       const { lastReportValue, lastReportUnit, checkServiceStatus } = CONFIG;
       const thresholdMs = getThresholdMilliseconds(lastReportValue, lastReportUnit);
 
-      log(req, `Filtering health: Disk < ${DSK_T}GB, Last Report > ${lastReportValue} ${lastReportUnit}, Check Service: ${checkServiceStatus}`);
-
       const rows = parsed.map((r) => {
         const issues = [];
         const diskBad = r.diskGB != null && r.diskGB <= DSK_T;
@@ -190,7 +190,6 @@ function attachHealthRoutes(app, ctx) {
         
         const isWindows = String(r.os).toLowerCase().includes("win");
         
-        // FIX: Disable service status check for EUC users (prevents inflated error counts)
         if (checkServiceStatus && isWindows && userRole !== 'EUC' && r.serviceStatus.toLowerCase() !== "running") {
             issues.push(`Service ${r.serviceStatus} (Window Update)`);
         }
@@ -208,12 +207,14 @@ function attachHealthRoutes(app, ctx) {
     }
   });
 
-  // -------------------- REBOOT PENDING (Filtered) --------------------
+  // --- 3. REBOOT PENDING ---
   app.get("/api/health/reboot-pending", async (req, res) => {
     req._logStart = Date.now();
     try {
-      log(req, "GET /api/health/reboot-pending");
+      const { group } = req.query;
+      log(req, `GET /api/health/reboot-pending (Group: ${group || 'ALL'})`);
 
+      const baseComp = getBaseComputers(group);
       const filter = getRoleFilter(req);
       
       const relevance =
@@ -224,7 +225,7 @@ function attachHealthRoutes(app, ctx) {
         '(value of result (it, bes property "Patch_Setu_IP_Address") | "N/A"), ' +
         '(value of result (it, bes property "Patch_Setu_UpTime") | "N/A"), ' +
         '(value of result (it, bes property "BES Relay Service Installed") | "N/A")) ' +
-        `of bes computers${filter}`;
+        `of ${baseComp}${filter}`;
 
       const url = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(relevance)}`;
       
@@ -262,9 +263,7 @@ function attachHealthRoutes(app, ctx) {
           };
         }).filter(Boolean);
 
-      // Filter only those that actually need a restart
       const rows = rowsAll.filter((r) => r.pendingRestart === true);
-      
       res.json({ ok: true, count: rows.length, rows });
     } catch (err) {
       log(req, "Reboot-pending error:", err?.message || err);
