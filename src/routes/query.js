@@ -2,6 +2,8 @@
 const axios = require("axios");
 const { joinUrl } = require("../utils/http");
 const { logFactory } = require("../utils/log");
+const { getBfAuthContext } = require("../utils/http");
+
 
 function attachQueryProxy(app, ctx) {
   const log = logFactory(ctx.DEBUG_LOG);
@@ -21,13 +23,10 @@ function attachQueryProxy(app, ctx) {
       const bfUrl = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(relevance)}`;
       log(req, "BF GET →", bfUrl);
 
-      const resp = await axios.get(bfUrl, {
-        httpsAgent,
-        auth: BIGFIX_USER && BIGFIX_PASS ? { username: BIGFIX_USER, password: BIGFIX_PASS } : undefined,
-        headers: { Accept: "application/json" },
-        responseType: "text",
-        timeout: 60_000,
-        validateStatus: () => true,
+      const bfAuthOpts = await getBfAuthContext(req, ctx);
+      const resp = await axios.get(url, {
+          ...bfAuthOpts,
+          headers: { Accept: "application/json" }
       });
 
       log(req, `BF GET ← ${resp.status}`);

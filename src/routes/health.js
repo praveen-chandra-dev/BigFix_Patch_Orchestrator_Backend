@@ -3,6 +3,8 @@ const { parseTupleRows } = require("../utils/query");
 const { joinUrl } = require("../utils/http");
 const { actionStore, CONFIG } = require("../state/store");
 const { logFactory } = require("../utils/log");
+const { getBfAuthContext } = require("../utils/http");
+
 
 // ----------------- HELPERS -----------------
 
@@ -229,15 +231,11 @@ function attachHealthRoutes(app, ctx) {
 
       const url = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(relevance)}`;
       
+      const bfAuthOpts = await getBfAuthContext(req, ctx);
       const resp = await axios.get(url, {
-        httpsAgent,
-        auth: BIGFIX_USER && BIGFIX_PASS ? { username: BIGFIX_USER, password: BIGFIX_PASS } : undefined,
-        headers: { Accept: "application/json" },
-        responseType: "json",
-        timeout: 60_000,
-        validateStatus: () => true,
+          ...bfAuthOpts,
+          headers: { Accept: "application/json" }
       });
-
       if (resp.status < 200 || resp.status >= 300) return res.status(resp.status).send(resp.data);
 
       const tuples = parseTupleRows(resp.data);

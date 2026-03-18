@@ -6,6 +6,7 @@ const { actionStore } = require("../state/store");
 const { logFactory } = require("../utils/log");
 const { sendTriggerMail } = require("../mail/transport");
 const { sql, getPool } = require("../db/mssql"); 
+const { getBfAuthContext } = require("../utils/http");
 
 /** CSV helper */
 function toCSV(serverList) {
@@ -110,13 +111,10 @@ function attachActionsRoutes(app, ctx) {
       const url = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(relevance)}`;
       log(req, "Restart: ComputerID query →", url);
 
+      const bfAuthOpts = await getBfAuthContext(req, ctx);
       const resp = await axios.get(url, {
-        httpsAgent,
-        auth: { username: BIGFIX_USER, password: BIGFIX_PASS },
-        headers: { Accept: "application/json" },
-        responseType: "json",
-        timeout: 60_000,
-        validateStatus: () => true,
+          ...bfAuthOpts,
+          headers: { Accept: "application/json" }
       });
 
       if (resp.status < 200 || resp.status >= 300) {
@@ -191,13 +189,10 @@ function attachActionsRoutes(app, ctx) {
       const safeComputerName = computerName.toLowerCase().replace(/"/g, '\\"');
       const relevance = `(ids of it) of bes computers whose (name of it as lowercase = "${safeComputerName}")`;
       const url = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(relevance)}`;
+      const bfAuthOpts = await getBfAuthContext(req, ctx);
       const resp = await axios.get(url, {
-        httpsAgent,
-        auth: { username: BIGFIX_USER, password: BIGFIX_PASS },
-        headers: { Accept: "application/json" },
-        responseType: "json",
-        timeout: 60_000,
-        validateStatus: () => true,
+          ...bfAuthOpts,
+          headers: { Accept: "application/json" }
       });
       if (resp.status < 200 || resp.status >= 300) throw new Error(`BigFix query failed: HTTP ${resp.status}`);
       const parts = []; collectStrings(resp.data?.result, parts); 

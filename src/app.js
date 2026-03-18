@@ -76,8 +76,10 @@ function buildApp() {
   attachBaselineRoutes(app, ctx, "./routes/baseline", "attachBaselineRoutes");
   attachFlexible(app, ctx, "./routes/groups", "attachGroupRoutes");
   attachFlexible(app, ctx, "./routes/vcenter", "attachVcenterRoutes");
-
   attachFlexible(app, ctx, "./routes/riskBaselines", "attachBaselineRoutes");
+  
+  // NEW ROLE ROUTES
+  attachFlexible(app, ctx, "./routes/roles", "attachRoleRoutes");
 
   // --- NEW: RISK PRIORITIZATION API ROUTES ---
   const patchRouter = tryRequire("./routes/patches");

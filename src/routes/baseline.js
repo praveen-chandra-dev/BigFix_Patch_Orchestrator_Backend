@@ -3,6 +3,7 @@ const axios = require("axios");
 const { joinUrl } = require("../utils/http");
 const { logFactory } = require("../utils/log");
 const { sql, getPool } = require("../db/mssql");
+const { getBfAuthContext } = require("../utils/http");
 
 // --- Helper: Verify if Baseline IDs exist in BigFix (Lazy Sync) ---
 async function verifyBigFixBaselines(bigfixCtx, ids) {
@@ -15,11 +16,11 @@ async function verifyBigFixBaselines(bigfixCtx, ids) {
   
   try {
     const url = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(relevance)}`;
-    const resp = await axios.get(url, {
-      httpsAgent,
-      auth: { username: BIGFIX_USER, password: BIGFIX_PASS },
-      headers: { Accept: "application/json" }
-    });
+    const bfAuthOpts = await getBfAuthContext(req, ctx);
+      const resp = await axios.get(url, {
+          ...bfAuthOpts,
+          headers: { Accept: "application/json" }
+      });
     const result = resp.data?.result;
     const foundIds = [];
     if (Array.isArray(result)) {

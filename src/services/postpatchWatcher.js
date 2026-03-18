@@ -5,6 +5,8 @@ const { joinUrl } = require("../utils/http");
 const { collectStrings, parseTupleRows } = require("../utils/query");
 const { sendPostPatchMail } = require("../mail/transport");
 const { sql, getPool } = require("../db/mssql");
+const { getBfAuthContext } = require("../utils/http");
+
 
 /* -------------------- tiny XML helpers -------------------- */
 function pickTag(text, tag) {
@@ -64,14 +66,11 @@ async function fetchActionResults(bigfixCtx, id) {
 
     const url = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(relevance)}`;
     
-    const resp = await axios.get(url, {
-      httpsAgent,
-      auth: { username: BIGFIX_USER, password: BIGFIX_PASS },
-      headers: { Accept: "application/json" },
-      responseType: "json",
-      timeout: 60_000,
-      validateStatus: () => true,
-    });
+    const bfAuthOpts = await getBfAuthContext(req, ctx);
+      const resp = await axios.get(url, {
+          ...bfAuthOpts,
+          headers: { Accept: "application/json" }
+      });
 
     if (resp.status < 200 || resp.status >= 300) {
       return { rows: [] };

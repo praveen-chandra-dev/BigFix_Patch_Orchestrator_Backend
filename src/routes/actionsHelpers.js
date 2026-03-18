@@ -4,6 +4,7 @@ const { joinUrl } = require("../utils/http");
 const { parseTupleRows } = require("../utils/query");
 const { actionStore } = require("../state/store");
 const { logFactory } = require("../utils/log");
+const { getBfAuthContext } = require("../utils/http");
 
 function pickTag(text, tag) {
   const m = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, "i").exec(text);
@@ -90,13 +91,10 @@ function attachActionHelpers(app, ctx) {
       const url = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(relevance)}`;
       log(req, "BF GET →", url);
 
+      const bfAuthOpts = await getBfAuthContext(req, ctx);
       const resp = await axios.get(url, {
-        httpsAgent,
-        auth: { username: BIGFIX_USER, password: BIGFIX_PASS },
-        headers: { Accept: "application/json" },
-        responseType: "json",
-        timeout: 60_000,
-        validateStatus: () => true,
+          ...bfAuthOpts,
+          headers: { Accept: "application/json" }
       });
       log(req, "BF GET ←", resp.status);
 

@@ -4,7 +4,7 @@ const { joinUrl } = require("../utils/http");
 const { logFactory } = require("../utils/log");
 const { sql, getPool } = require("../db/mssql");
 const { bigfixClient } = require("../services/bigfix");
-
+const { getBfAuthContext } = require("../utils/http");
 // --- CACHE STORE (For Servers) ---
 const CACHE_TTL = 10 * 60 * 1000; // 10 Minutes
 let computersCache = {
@@ -25,8 +25,12 @@ async function verifyBigFixIds(bigfixCtx, ids) {
   let foundIds = [];
   try {
     const url = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(relevance)}`;
-    const resp = await axios.get(url, { httpsAgent, auth: { username: BIGFIX_USER, password: BIGFIX_PASS }, headers: { Accept: "application/json" } });
-    const result = resp.data?.result;
+      const bfAuthOpts = await getBfAuthContext(req, ctx);
+      const resp = await axios.get(url, {
+          ...bfAuthOpts,
+          headers: { Accept: "application/json" }
+      });    
+      const result = resp.data?.result;
     if (Array.isArray(result)) result.forEach(r => foundIds.push(String(r)));
     else if (result) foundIds.push(String(result));
   } catch (e) { console.warn("[GroupSync] Relevance check failed:", e.message); }

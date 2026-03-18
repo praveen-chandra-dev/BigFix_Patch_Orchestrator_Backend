@@ -1,28 +1,33 @@
-// bigfix-backend/src/services/ldap.js
-const { Client } = require('ldapts');
+// src/services/ldap.js
+const { Client, Control } = require('ldapts');
 const { getCfg } = require('../env');
 const { logger } = require('./logger');
 
+// Microsoft Domain Scope Control (OID: 1.2.840.113556.1.4.1339)
+// Adding `value: ''` patches a bug in the ldapts library so its internal encoder doesn't crash
+const domainScopeControl = new Control({
+    type: '1.2.840.113556.1.4.1339',
+    criticality: false,
+    value: '' 
+});
+
 /**
- * Attempts to authenticate the user against the configured LDAP server.
+ * Standard LDAP Auth for Login, with SSL support and Just-In-Time DN Discovery
  */
 async function authenticateLDAP(username, password) {
   const cfg = getCfg();
   
-  // 1. Check if Enabled
-  if (!cfg.LDAP_ENABLED) return false; 
+  if (!cfg.LDAP_ENABLED) return { authenticated: false }; 
 
-  // 2. Validate Config
-  const url = (cfg.LDAP_URL || "").trim();
+  let url = (cfg.LDAP_URL || "").trim();
   const domain = (cfg.LDAP_DOMAIN || "").trim();
 
   if (!url || !domain) {
-      logger.warn("[LDAP] Enabled but missing URL or Domain configuration.");
-      return false;
+      logger.warn("[LDAP] Missing URL or Domain configuration.");
+      return { authenticated: false };
   }
-  if (!username || !password) return false;
+  if (!username || !password) return { authenticated: false };
 
-  // 3. Evaluate strict mode safely (handles both boolean and string "true"/"false" from .env)
   const isStrict = String(cfg.LDAP_ALLOW_SELF_SIGNED).toLowerCase() !== 'true';
   
   let upn = username;
@@ -30,37 +35,67 @@ async function authenticateLDAP(username, password) {
       upn = `${username}@${domain}`;
   }
 
-  // 4. Build TLS Options dynamically to avoid Node.js "undefined" Type Errors
   const tlsOpts = { rejectUnauthorized: isStrict };
-  if (!isStrict) {
-      // Only attach this property if NOT strict. 
-      // Attaching 'undefined' causes a hard crash in modern Node.js
-      tlsOpts.checkServerIdentity = () => undefined;
-  }
+  if (!isStrict) tlsOpts.checkServerIdentity = () => undefined;
 
-  // 5. Configure Client
   const client = new Client({
     url: url,
     tlsOptions: tlsOpts,
-    strictDN: false, // <--- CRITICAL: Active Directory DNs often violate strict standards
+    strictDN: false, 
     timeout: 10000,
     connectTimeout: 10000
   });
 
   try {
-    logger.info(`[LDAP] Attempting auth for ${upn} at ${url} (SSL Strict: ${isStrict})`);
-    
+    // 1. Authenticate user over SSL
     await client.bind(upn, password);
+    logger.info(`[LDAP] Successful SSL bind for ${upn}`);
     
-    logger.info(`[LDAP] Auth success for ${username}`);
-    return true;
-  } catch (ex) {
-    logger.warn(`[LDAP] Auth failed for ${username}: ${ex.message}`);
+    let dn = null;
+    const searchBase = domain.split('.').map(part => `DC=${part}`).join(',');
     
-    if (ex.code === 'ECONNRESET') {
-        logger.warn("[LDAP] Hint: Verify protocol matches port (ldaps:// for 636, ldap:// for 389) and 'Allow Self-Signed' is set correctly.");
+    // STRATEGY 1: Use the Domain Base with the Patched Domain Scope Control
+    try {
+        const { searchEntries } = await client.search(searchBase, {
+            filter: `(&(objectCategory=person)(objectClass=user)(userPrincipalName=${username}))`,
+            scope: 'sub',
+            attributes: ['dn', 'distinguishedName']
+        }, [domainScopeControl]);
+        
+        if (searchEntries && searchEntries.length > 0) {
+            dn = searchEntries[0].dn || searchEntries[0].distinguishedName;
+            logger.info(`[LDAP] Extracted DN via Strategy 1: ${dn}`);
+        }
+    } catch (err1) {
+        logger.warn(`[LDAP] Strategy 1 encountered AD error: ${err1.message}. Attempting Strategy 2...`);
+        
+        // STRATEGY 2: Fallback to a Forest Root Search (Empty Base)
+        // Querying the Global Catalog with an empty base natively bypasses domain referrals
+        try {
+            const { searchEntries } = await client.search('', {
+                filter: `(&(objectCategory=person)(objectClass=user)(userPrincipalName=${username}))`,
+                scope: 'sub',
+                attributes: ['dn', 'distinguishedName'],
+                sizeLimit: 1
+            });
+            
+            if (searchEntries && searchEntries.length > 0) {
+                dn = searchEntries[0].dn || searchEntries[0].distinguishedName;
+                logger.info(`[LDAP] Extracted DN via Strategy 2: ${dn}`);
+            }
+        } catch (err2) {
+            logger.warn(`[LDAP] Strategy 2 failed: ${err2.message}`);
+        }
     }
-    return false;
+
+    if (!dn) {
+        logger.warn(`[LDAP] Extraction failed entirely. Could not resolve DN for BigFix.`);
+    }
+
+    return { authenticated: true, dn };
+  } catch (ex) {
+    logger.warn(`[LDAP] SSL Auth failed: ${ex.message}`);
+    return { authenticated: false };
   } finally {
     try { await client.unbind(); } catch (e) {}
   }
