@@ -1,12 +1,13 @@
 // src/routes/health.js
+const axios = require("axios");
 const { parseTupleRows } = require("../utils/query");
-const { joinUrl } = require("../utils/http");
-const { actionStore, CONFIG } = require("../state/store");
+const { joinUrl, getBfAuthContext } = require("../utils/http");
+const { CONFIG } = require("../state/store");
 const { logFactory } = require("../utils/log");
-const { getBfAuthContext } = require("../utils/http");
+const { getRoleAssets, isMasterOperator } = require("../services/bigfix");
 
-
-// ----------------- HELPERS -----------------
+const CACHE_TTL = 60 * 1000; 
+let healthCache = {};
 
 function getThresholdMilliseconds(value, unit) {
   const v = Math.max(0, Number(value) || 0);
@@ -23,28 +24,46 @@ function isTimeUnhealthy(timeString, thresholdMs) {
     const parsableDate = timeString.substring(timeString.indexOf(", ") + 2);
     const lastReportTime = Date.parse(parsableDate);
     if (isNaN(lastReportTime)) return true;
-    const now = Date.now();
-    const age = now - lastReportTime;
-    return age > thresholdMs;
-  } catch {
-    return true;
-  }
+    return (Date.now() - lastReportTime) > thresholdMs;
+  } catch { return true; }
 }
 
-// ------------------------------- ROUTES ---------------------------------
+function getSessionUser(req) {
+    if (req && req.cookies && req.cookies.auth_session) {
+        try { return JSON.parse(req.cookies.auth_session).username; } catch(e){}
+    }
+    return "unknown";
+}
+
+function getSessionRole(req) {
+    if (req && req.cookies && req.cookies.auth_session) {
+        try { return JSON.parse(req.cookies.auth_session).role; } catch(e){}
+    }
+    return null;
+}
+
+async function getRoleFilter(req, ctx) {
+    const operatorName = getSessionUser(req);
+    const isMO = await isMasterOperator(req, ctx, operatorName);
+    
+    if (isMO) return "";
+
+    const activeRole = req.headers['x-user-role'] || getSessionRole(req);
+    if (!activeRole || activeRole === "Admin" || activeRole === "No Role Assigned") return " whose (false)"; 
+
+    const roleAssets = await getRoleAssets(req, ctx, activeRole);
+    if (!roleAssets.found || roleAssets.compNames.length === 0) return " whose (false)";
+
+    const setStr = roleAssets.compNames.map(c => `"${c.toLowerCase()}"`).join("; ");
+    return ` whose (name of it as lowercase is contained by set of (${setStr}))`;
+}
 
 function attachHealthRoutes(app, ctx) {
   const log = logFactory(ctx.DEBUG_LOG);
-  const { BIGFIX_BASE_URL, BIGFIX_USER, BIGFIX_PASS, httpsAgent } = ctx.bigfix;
-  const axios = require("axios");
+  const { BIGFIX_BASE_URL } = ctx.bigfix;
 
-  app.get("/health", (req, res) => {
-    log(req, "GET /health");
-    res.json({ ok: true, ts: new Date().toISOString() });
-  });
+  app.get("/health", (req, res) => { res.json({ ok: true, ts: new Date().toISOString() }); });
 
-  // --- FIX: Extract Base Computers Query (Group Scoping) ---
-  // Returns the correct base relevance object depending on if a group is targeted
   function getBaseComputers(groupName) {
       if (groupName) {
           const safeGroup = String(groupName).replace(/"/g, '""').toLowerCase();
@@ -53,46 +72,24 @@ function attachHealthRoutes(app, ctx) {
       return `bes computers`;
   }
 
-  // --- FIX: Extract Role Filter ---
-  function getRoleFilter(req) {
-    const userRole = req.headers['x-user-role'] || 'Admin';
-    let conditions = [];
-
-    if (userRole === 'Windows') {
-        conditions.push(`(operating system of it as lowercase contains "win")`);
-    } else if (userRole === 'Linux') {
-        conditions.push(`(operating system of it as lowercase does not contain "win")`);
-    } else if (userRole === 'EUC') {
-        conditions.push(`(value of result (it, bes property "Device Type") as lowercase != "server")`);
-    }
-
-    if (conditions.length > 0) {
-        return ` whose (${conditions.join(" and ")})`;
-    }
-    return "";
-  }
-
-  // --- 1. TOTAL COMPUTERS ---
   app.get("/api/infra/total-computers", async (req, res) => {
-    req._logStart = Date.now();
     try {
-      const { group } = req.query;
-      log(req, `GET /api/infra/total-computers (Group: ${group || 'ALL'})`);
+      const activeRole = req.headers['x-user-role'] || getSessionRole(req);
+      const cacheKey = `total_${getSessionUser(req)}_${activeRole}_${req.query.group || 'all'}`;
+      const now = Date.now();
       
-      const baseComp = getBaseComputers(group);
-      const filter = getRoleFilter(req);
+      if (healthCache[cacheKey] && now - healthCache[cacheKey].lastFetch < CACHE_TTL) {
+          return res.json(healthCache[cacheKey].data);
+      }
+
+      const baseComp = getBaseComputers(req.query.group);
+      const filter = await getRoleFilter(req, ctx);
+      
       const relevance = `number of ${baseComp}${filter}`;
-      
       const url = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(relevance)}`;
       
-      const resp = await axios.get(url, {
-        httpsAgent,
-        auth: BIGFIX_USER && BIGFIX_PASS ? { username: BIGFIX_USER, password: BIGFIX_PASS } : undefined,
-        headers: { Accept: "application/json" },
-        responseType: "json",
-        timeout: 60_000,
-        validateStatus: () => true,
-      });
+      const bfAuthOpts = await getBfAuthContext(req, ctx); 
+      const resp = await axios.get(url, { ...bfAuthOpts, headers: { Accept: "application/json" }, validateStatus: () => true });
 
       if (resp.status < 200 || resp.status >= 300) return res.status(resp.status).send(resp.data);
 
@@ -100,127 +97,91 @@ function attachHealthRoutes(app, ctx) {
       const data = resp.data;
       if (data && data.result && Array.isArray(data.result) && data.result[0]) {
         const tuple = data.result[0].Tuple || data.result[0].tuple || data.result[0];
-        const v = Array.isArray(tuple) ? tuple[0] : tuple;
-        const m = String(v).match(/\d+/);
+        const m = String(Array.isArray(tuple) ? tuple[0] : tuple).match(/\d+/);
         if (m) total = Number(m[0]);
       }
       if (!total) {
         const m = JSON.stringify(resp.data).match(/\b\d+\b/);
         if (m) total = Number(m[0]);
       }
-
-      res.json({ ok: true, total });
-    } catch (err) {
-      log(req, "total-computers error:", err?.message || err);
-      res.status(500).json({ ok: false, error: String(err?.message || err) });
-    }
+      
+      const payload = { ok: true, total };
+      healthCache[cacheKey] = { data: payload, lastFetch: now };
+      res.json(payload);
+    } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
   });
 
-  // --- 2. CRITICAL HEALTH ---
   app.get("/api/health/critical", async (req, res) => {
-    req._logStart = Date.now();
     try {
-      const { group } = req.query;
-      log(req, `GET /api/health/critical (Group: ${group || 'ALL'})`);
-
-      const baseComp = getBaseComputers(group);
-      const filter = getRoleFilter(req);
-      const userRole = req.headers['x-user-role'] || 'Admin';
+      const activeRole = req.headers['x-user-role'] || getSessionRole(req);
+      const cacheKey = `crit_${getSessionUser(req)}_${activeRole}_${req.query.group || 'all'}`;
+      const now = Date.now();
       
-      const relevance =
-        '((name of it | "N/A") ,' + 
+      if (healthCache[cacheKey] && now - healthCache[cacheKey].lastFetch < CACHE_TTL) {
+          return res.json(healthCache[cacheKey].data);
+      }
+
+      const baseComp = getBaseComputers(req.query.group);
+      const filter = await getRoleFilter(req, ctx);
+      
+      // CRITICAL FIX: Changed 'bes properties' to 'bes property' to prevent Fatal BigFix Evaluation Error
+      const relevance = '((name of it | "N/A") ,' + 
         ' (value of result (it, bes property "Patch_Setu_Disk_Space") | "N/A"),' +
         ' (value of result (it, bes property "Patch_Setu_IP_Address") | "N/A"),' +
         ' (last report time of it as string | "N/A"),' + 
         ' (value of result (it, bes property "Patch_Setu_Window_Update_Service") | "N/A"),' +
         ' (operating system of it | "N/A"))' +
         ` of ${baseComp}${filter}`;
-
+        
       const url = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(relevance)}`;
       
-      const resp = await axios.get(url, {
-        httpsAgent,
-        auth: BIGFIX_USER && BIGFIX_PASS ? { username: BIGFIX_USER, password: BIGFIX_PASS } : undefined,
-        headers: { Accept: "application/json" },
-        responseType: "json",
-        timeout: 60_000,
-        validateStatus: () => true,
-      });
+      const bfAuthOpts = await getBfAuthContext(req, ctx); 
+      const resp = await axios.get(url, { ...bfAuthOpts, headers: { Accept: "application/json" }, validateStatus: () => true });
 
-      if (resp.status < 200 || resp.status >= 300) {
-        return res.status(resp.status).send(resp.data);
-      }
+      if (resp.status < 200 || resp.status >= 300) return res.status(resp.status).send(resp.data);
 
       const tuples = parseTupleRows(resp.data);
-
-      const afterEq = (s) => {
-        const str = String(s || "").trim();
-        const idx = str.indexOf("=");
-        return idx >= 0 ? str.slice(idx + 1).trim() : str;
-      };
-      const parseDiskGB = (s) => {
-        const m = String(s || "").match(/(\d+(?:\.\d+)?)\s*GB/i);
-        return m ? Number(m[1]) : null;
-      };
+      const afterEq = (s) => { const str = String(s || "").trim(); const idx = str.indexOf("="); return idx >= 0 ? str.slice(idx + 1).trim() : str; };
+      const parseDiskGB = (s) => { const m = String(s || "").match(/(\d+(?:\.\d+)?)\s*GB/i); return m ? Number(m[1]) : null; };
 
       const parsed = tuples.map((parts) => {
-        const [serverStr, diskStr, ipStr, lastReportTime, serviceStatus, osStr] = parts;
-        const diskPretty = afterEq(diskStr) || "N/A";
-        return {
-          server: afterEq(serverStr) || "N/A",
-          disk: diskPretty,
-          diskGB: parseDiskGB(diskPretty),
-          ip: afterEq(ipStr) || "N/A",
-          lastReportTime: lastReportTime || "N/A",
-          serviceStatus: serviceStatus || "N/A",
-          os: osStr || "N/A",
-          raw: parts,
-        };
+        const diskPretty = afterEq(parts[1]) || "N/A";
+        return { server: afterEq(parts[0]) || "N/A", disk: diskPretty, diskGB: parseDiskGB(diskPretty), ip: afterEq(parts[2]) || "N/A", lastReportTime: parts[3] || "N/A", serviceStatus: parts[4] || "N/A", os: parts[5] || "N/A", raw: parts };
       });
 
       const DSK_T = Number(CONFIG.diskThresholdGB);
-      const { lastReportValue, lastReportUnit, checkServiceStatus } = CONFIG;
-      const thresholdMs = getThresholdMilliseconds(lastReportValue, lastReportUnit);
+      const thresholdMs = getThresholdMilliseconds(CONFIG.lastReportValue, CONFIG.lastReportUnit);
 
       const rows = parsed.map((r) => {
         const issues = [];
-        const diskBad = r.diskGB != null && r.diskGB <= DSK_T;
-        const timeBad = isTimeUnhealthy(r.lastReportTime, thresholdMs);
+        if (r.diskGB != null && r.diskGB <= DSK_T) issues.push(`Low Disk (${r.diskGB}GB)`);
+        if (isTimeUnhealthy(r.lastReportTime, thresholdMs)) issues.push("Not Reporting");
+        if (CONFIG.checkServiceStatus && String(r.os).toLowerCase().includes("win") && r.serviceStatus.toLowerCase() !== "running") issues.push(`Service ${r.serviceStatus}`);
         
-        if (diskBad) issues.push(`Low Disk (${r.diskGB}GB)`);
-        if (timeBad) issues.push("Not Reporting");
-        
-        const isWindows = String(r.os).toLowerCase().includes("win");
-        
-        if (checkServiceStatus && isWindows && userRole !== 'EUC' && r.serviceStatus.toLowerCase() !== "running") {
-            issues.push(`Service ${r.serviceStatus} (Window Update)`);
-        }
-        
-        if (issues.length > 0) {
-            return { ...r, issues }; 
-        }
-        return null;
+        return issues.length > 0 ? { ...r, issues } : null;
       }).filter(Boolean);
 
-      res.json({ ok: true, count: rows.length, rows });
-    } catch (err) {
-      log(req, "Critical health error:", err?.message || err);
-      res.status(500).json({ ok: false, error: String(err?.message || err) });
-    }
+      const payload = { ok: true, count: rows.length, rows };
+      healthCache[cacheKey] = { data: payload, lastFetch: now };
+      res.json(payload);
+    } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
   });
 
-  // --- 3. REBOOT PENDING ---
   app.get("/api/health/reboot-pending", async (req, res) => {
-    req._logStart = Date.now();
     try {
-      const { group } = req.query;
-      log(req, `GET /api/health/reboot-pending (Group: ${group || 'ALL'})`);
-
-      const baseComp = getBaseComputers(group);
-      const filter = getRoleFilter(req);
+      const activeRole = req.headers['x-user-role'] || getSessionRole(req);
+      const cacheKey = `reboot_${getSessionUser(req)}_${activeRole}_${req.query.group || 'all'}`;
+      const now = Date.now();
       
-      const relevance =
-        '((name of it | "N/A"), ' +
+      if (healthCache[cacheKey] && now - healthCache[cacheKey].lastFetch < CACHE_TTL) {
+          return res.json(healthCache[cacheKey].data);
+      }
+
+      const baseComp = getBaseComputers(req.query.group);
+      const filter = await getRoleFilter(req, ctx);
+      
+      // CRITICAL FIX: Changed 'bes properties' to 'bes property' to prevent Fatal BigFix Evaluation Error
+      const relevance = '((name of it | "N/A"), ' +
         '(value of result (it, bes property "Patch_Setu_Pending_Restart") | "N/A"), ' +
         '(last report time of it as string | "N/A"), ' +
         '(value of result (it, bes property "Patch_Setu_Disk_Space") | "N/A"), ' +
@@ -228,45 +189,24 @@ function attachHealthRoutes(app, ctx) {
         '(value of result (it, bes property "Patch_Setu_UpTime") | "N/A"), ' +
         '(value of result (it, bes property "BES Relay Service Installed") | "N/A")) ' +
         `of ${baseComp}${filter}`;
-
+        
       const url = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(relevance)}`;
       
-      const bfAuthOpts = await getBfAuthContext(req, ctx);
-      const resp = await axios.get(url, {
-          ...bfAuthOpts,
-          headers: { Accept: "application/json" }
-      });
+      const bfAuthOpts = await getBfAuthContext(req, ctx); 
+      const resp = await axios.get(url, { ...bfAuthOpts, headers: { Accept: "application/json" } });
       if (resp.status < 200 || resp.status >= 300) return res.status(resp.status).send(resp.data);
 
       const tuples = parseTupleRows(resp.data);
-
-      const rowsAll = tuples.map((parts) => {
+      const rows = tuples.map((parts) => {
           if (!Array.isArray(parts) || parts.length < 7) return null;
-
           const [server, pendingStr, lastReportTime, diskStr, ipStr, uptime, besRelay] = parts;
-          
-          const ip = String(ipStr || "").replace(/^IP Address\s*=\s*/i, "").split(",")[0].trim() || "N/A";
-          const disk = String(diskStr || "").trim() || "N/A";
-          const pendingRestart = /^true$/i.test(String(pendingStr).trim());
+          return { server: server || "N/A", pendingRestart: /^true$/i.test(String(pendingStr).trim()), lastReportTime: lastReportTime || "N/A", disk: String(diskStr || "").trim() || "N/A", ip: String(ipStr || "").replace(/^IP Address\s*=\s*/i, "").split(",")[0].trim() || "N/A", uptime: uptime || "N/A", besRelay: besRelay || "N/A", raw: parts };
+        }).filter(r => r && r.pendingRestart === true);
 
-          return {
-            server: server || "N/A",
-            pendingRestart,
-            lastReportTime: lastReportTime || "N/A",
-            disk,
-            ip,
-            uptime: uptime || "N/A",
-            besRelay: besRelay || "N/A",
-            raw: parts,
-          };
-        }).filter(Boolean);
-
-      const rows = rowsAll.filter((r) => r.pendingRestart === true);
-      res.json({ ok: true, count: rows.length, rows });
-    } catch (err) {
-      log(req, "Reboot-pending error:", err?.message || err);
-      res.status(500).json({ ok: false, error: String(err?.message || err) });
-    }
+      const payload = { ok: true, count: rows.length, rows };
+      healthCache[cacheKey] = { data: payload, lastFetch: now };
+      res.json(payload);
+    } catch (err) { res.status(500).json({ ok: false, error: err.message }); }
   });
 }
 

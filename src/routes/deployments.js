@@ -2,8 +2,8 @@
 const axios = require("axios");
 const { joinUrl } = require("../utils/http");
 const { logFactory } = require("../utils/log");
+const { getBfAuthContext } = require("../utils/http");
 
-/** Parse: "Name | Id | State | Issued | Stopped | Issuer" */
 function parseRow(s) {
   const parts = String(s || "").split("|").map(x => x.trim());
   return {
@@ -18,13 +18,10 @@ function parseRow(s) {
 
 function attachDeploymentsRoutes(app, ctx) {
   const log = logFactory(ctx.DEBUG_LOG);
-  const { BIGFIX_BASE_URL, BIGFIX_USER, BIGFIX_PASS, httpsAgent } = ctx.bigfix;
+  const { BIGFIX_BASE_URL } = ctx.bigfix;
 
-  // GET /api/deployments/bps
   app.get("/api/deployments/bps", async (req, res) => {
-    req._logStart = Date.now();
     try {
-      // --- UPDATED RELEVANCE ---
       const relevance =
         `((name of it as string | "N/A") & " | " & ` +
         `(id of it as string | "N/A") & " | " & ` +
@@ -34,21 +31,18 @@ function attachDeploymentsRoutes(app, ctx) {
         `(name of issuer of it as string | "N/A")) of bes actions whose (name of it starts with "BPS_")`;
 
       const url = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(relevance)}`;
-      log(req, "GET deployments →", url);
+      
+      const bfAuthOpts = await getBfAuthContext(req, ctx); // SECURE CONTEXT
 
       const r = await axios.get(url, {
-        httpsAgent,
-        auth: { username: BIGFIX_USER, password: BIGFIX_PASS },
+        ...bfAuthOpts,
         headers: { Accept: "application/json" },
         responseType: "json",
         timeout: 60_000,
         validateStatus: () => true,
       });
-      log(req, "GET deployments ←", r.status);
 
-      if (r.status < 200 || r.status >= 300) {
-        return res.status(r.status).send(r.data);
-      }
+      if (r.status < 200 || r.status >= 300) return res.status(r.status).send(r.data);
 
       const rows = Array.isArray(r.data?.result) ? r.data.result : [];
       const flat = [];
@@ -63,11 +57,7 @@ function attachDeploymentsRoutes(app, ctx) {
       };
       rows.forEach(collect);
 
-      const items = flat
-        .filter(Boolean)
-        .map(parseRow)
-        .sort((a,b) => (Number(b.id)||0) - (Number(a.id)||0));
-
+      const items = flat.filter(Boolean).map(parseRow).sort((a,b) => (Number(b.id)||0) - (Number(a.id)||0));
       res.json({ ok: true, count: items.length, items });
     } catch (e) {
       res.status(500).json({ ok: false, error: e?.message || String(e) });
