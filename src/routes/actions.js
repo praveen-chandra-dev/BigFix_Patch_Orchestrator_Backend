@@ -2,11 +2,12 @@
 const axios = require("axios");
 const { joinUrl, toLowerSafe } = require("../utils/http");
 const { collectStrings, extractActionIdFromXml } = require("../utils/query");
-const { actionStore } = require("../state/store");
+const { actionStore, CONFIG } = require("../state/store");
 const { logFactory } = require("../utils/log");
 const { sendTriggerMail } = require("../mail/transport");
 const { sql, getPool } = require("../db/mssql"); 
 const { getBfAuthContext } = require("../utils/http");
+const { saveConfigToDB } = require("./config");
 
 function toCSV(serverList) {
   if (!serverList || serverList.length === 0) return null;
@@ -207,7 +208,16 @@ function attachActionsRoutes(app, ctx) {
 
       if (actionId) {
         const metadata = { id: actionId, createdAt: new Date().toISOString(), stage: envLabel, xml, baselineName, baselineSite: siteName, baselineFixletId: fixletId, groupName: gName, groupId: gId, groupSite: gSite, groupType: gType, endOffset: endDateTimeLocalOffsetVal, preMail: !!shouldMail, smtpEnabled: smtpReady, postMailSent: false, triggeredBy: triggeredBy || "Unknown" };
-        actionStore.lastActionId = actionId; actionStore.actions[actionId] = metadata;
+        actionStore.lastActionId = actionId; 
+        actionStore.actions[actionId] = metadata;
+
+        // Persist to GlobalConfig so it carries over to Pilot for ALL users
+        if (envLabel.toLowerCase() === "sandbox") {
+            CONFIG.lastSandboxBaseline = baselineName;
+            CONFIG.lastSandboxGroup = gName;
+            try { await saveConfigToDB(CONFIG, req, log); } catch(e) {}
+        }
+
         try {
           const pool = await getPool();
           await pool.request().input("ActionID", sql.Int, Number(actionId)).input("Metadata", sql.NVarChar(sql.MAX), JSON.stringify(metadata)).input("PostMailSent", sql.Bit, 0).query(`INSERT INTO dbo.ActionHistory (ActionID, Metadata, PostMailSent, CreatedAt) VALUES (@ActionID, @Metadata, @PostMailSent, SYSUTCDATETIME())`);

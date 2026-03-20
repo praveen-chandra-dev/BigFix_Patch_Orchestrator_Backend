@@ -3,12 +3,12 @@ const https = require("https");
 const axios = require("axios");
 const { joinUrl, toLowerSafe } = require("../utils/http");
 const { collectStrings, extractActionIdFromXml } = require("../utils/query");
-const { actionStore } = require("../state/store");
+const { actionStore, CONFIG } = require("../state/store");
 const { logFactory } = require("../utils/log");
 const { sendTriggerMail } = require("../mail/transport");
 const { sql, getPool } = require("../db/mssql"); 
+const { saveConfigToDB } = require("./config");
 
-// --- XML Escape Helper (Fixed: Added this missing function) ---
 function xmlEscape(str) {
   if (str == null) return "";
   return String(str)
@@ -19,7 +19,6 @@ function xmlEscape(str) {
     .replace(/'/g, "&apos;");
 }
 
-// --- CSV helper ---
 function toCSV(serverList) {
   if (!serverList || serverList.length === 0) return null;
   const header = "ServerName";
@@ -27,7 +26,6 @@ function toCSV(serverList) {
   return [header, ...rows].join("\r\n");
 }
 
-/* ---------------- Time helpers ---------------- */
 function getPatchWindowMs(patchWindow) {
   if (patchWindow && typeof patchWindow === "object") {
     const d = Number(patchWindow.days) || 0;
@@ -123,7 +121,6 @@ async function triggerBaselineAction(req, ctx, {
   const log = logFactory(ctx.DEBUG_LOG);
   let csvContent = null;
 
-  // 1) Baseline lookup
   const qBaseline = `(name of site of it, id of it) of bes baseline whose (name of it is "${baselineName.replace(/"/g, '\\"')}")`;
   const urlBaseline = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(qBaseline)}`;
   log(req, "Baseline lookup →", urlBaseline);
@@ -145,7 +142,6 @@ async function triggerBaselineAction(req, ctx, {
 
   const siteName = partsB[0]; const fixletId = partsB[1];
 
-  // 2) Group lookup (WITH SELF-HEALING LOGIC)
   const qGroup = `(name of it, id of it, name of site of it, (if automatic flag of it then "Automatic" else if manual flag of it then "manual" else "server based")) of bes computer group whose (name of it is "${groupName.replace(/"/g, '\\"')}")`;
   const urlGroup = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(qGroup)}`;
   log(req, "Group lookup →", urlGroup);
@@ -162,31 +158,23 @@ async function triggerBaselineAction(req, ctx, {
   const groupRows = Array.isArray(groupResp.data?.result) ? groupResp.data.result : [];
 
   if (!groupRows.length) {
-      // --- SELF-HEALING START ---
       console.log(`[GroupSync] Group '${groupName}' not found in BigFix. Checking local DB...`);
       const pool = await getPool();
       
-      // Check if this group exists in our AssetOwnership table
       const dbCheck = await pool.request()
           .input('Name', sql.NVarChar(255), groupName)
           .query("SELECT BigFixID FROM dbo.AssetOwnership WHERE AssetName = @Name AND AssetType = 'Group'");
       
       if (dbCheck.recordset.length > 0) {
-          // It exists in DB but NOT in BigFix -> It was deleted from Console.
           console.log(`[GroupSync] 'Ghost' group detected. Removing '${groupName}' from database.`);
-          
-          // Instantly delete from DB
           await pool.request()
              .input('Name', sql.NVarChar(255), groupName)
              .query("DELETE FROM dbo.AssetOwnership WHERE AssetName = @Name AND AssetType = 'Group'");
              
-          // Throw helpful error
           throw new Error(`Group '${groupName}' has been deleted from the BigFix Console. It was removed from your list. Please create it again.`);
       } else {
-          // Standard error if it wasn't in DB either
           throw new Error(`Group '${groupName}' does not exist in BigFix.`);
       }
-      // --- SELF-HEALING END ---
   }
 
   const partsG = []; collectStrings(groupRows[0], partsG);
@@ -194,7 +182,6 @@ async function triggerBaselineAction(req, ctx, {
 
   const gName = partsG[0], gId = partsG[1], gSite = partsG[2], gType = partsG[3];
 
-  // 3) Attach CSV (optional)
   if (autoMail) {
     try {
       const qServers = `names of members of bes computer group whose (id of it = ${gId})`;
@@ -213,7 +200,6 @@ async function triggerBaselineAction(req, ctx, {
     }
   }
 
-  // 4) Relevance
   const type = toLowerSafe(gType);
   const siteTokenForAutomatic = gSite === "ActionSite" ? `site "actionsite"` : `site "CustomSite_${gSite}"`;
   let customRelevance = "";
@@ -226,13 +212,11 @@ async function triggerBaselineAction(req, ctx, {
     customRelevance = `exists true whose ( if true then ( member of server based group "${gName}" of client ) else false)`;
   }
 
-  // 5) XML Body
   const stageName = environment || "Pilot";
   const actionTitle = `BPS_${baselineName}_${stageName}`;
   const xmlOffset = endOffset || "P2D";
   const xml = `<?xml version="1.0" encoding="UTF-8"?><BES xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="BES.xsd"><SourcedFixletAction><SourceFixlet><Sitename>${xmlEscape(siteName)}</Sitename><FixletID>${xmlEscape(fixletId)}</FixletID><Action>Action1</Action></SourceFixlet><Target><CustomRelevance>${xmlEscape(customRelevance)}</CustomRelevance></Target><Settings><HasEndTime>true</HasEndTime><EndDateTimeLocalOffset>${xmlEscape(xmlOffset)}</EndDateTimeLocalOffset><UseUTCTime>true</UseUTCTime></Settings><Title>${xmlEscape(actionTitle)}</Title></SourcedFixletAction></BES>`;
 
-  // 6) Post to BigFix
   const bfPostUrl = joinUrl(BIGFIX_BASE_URL, "/api/actions");
   log(req, `BF POST → ${bfPostUrl} body=${xml.length} chars`);
   const bfResp = await axios.post(bfPostUrl, xml, {
@@ -249,8 +233,8 @@ async function triggerBaselineAction(req, ctx, {
 
   const actionId = extractActionIdFromXml(String(bfResp.data || ""));
   const smtpReady = !!(ctx.smtp && ctx.smtp.SMTP_HOST && ctx.smtp.SMTP_FROM);
+  let emailError = null;
 
-  // --- NEW: Save to both Cache and DB ---
   if (actionId) {
     const metadata = {
       id: actionId,
@@ -274,6 +258,16 @@ async function triggerBaselineAction(req, ctx, {
     actionStore.lastActionId = actionId;
     actionStore.actions[actionId] = metadata;
 
+    // Save configuration globally for next stages
+    if (stageName.toLowerCase() === "pilot") {
+        CONFIG.lastPilotBaseline = baselineName;
+        CONFIG.lastPilotGroup = gName;
+    } else if (stageName.toLowerCase() === "production") {
+        CONFIG.lastProdBaseline = baselineName;
+        CONFIG.lastProdGroup = gName;
+    }
+    try { await saveConfigToDB(CONFIG, req, log); } catch(e) {}
+
     try {
       const pool = await getPool();
       await pool.request()
@@ -286,7 +280,6 @@ async function triggerBaselineAction(req, ctx, {
     }
   }
 
-  // 7) Email (pre-patch)
   if (autoMail && smtpReady) { 
     try {
       await sendTriggerMail(ctx.smtp, {
@@ -357,7 +350,6 @@ function attachPilotRoutes(app, ctx) {
 
     } catch (err) {
       log(req, `Trigger Error:`, err?.message || err);
-      // Return 500 but with the explicit message
       res.status(500).json({ ok: false, error: String(err?.message || err) });
     }
   };

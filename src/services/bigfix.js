@@ -114,7 +114,7 @@ const bigfixClient = (req, ctx) => {
   if (!BIGFIX_BASE_URL) throw new Error("BigFix URL not configured");
 
   async function getGroupMembers(groupName) {
-    const relevance = `(name of it, (if (exists ip addresses of it) then (concatenations "," of ip addresses of it as string) else "N/A"), (operating system of it | "Unknown")) of members of bes computer group whose (name of it = "${groupName}")`;
+    const relevance = `((name of it | "N/A"), (if (exists values of results (it, bes properties "IP Address")) then (concatenation ", " of values of results (it, bes properties "IP Address")) else "N/A"), (operating system of it | "Unknown")) of members  whose (value of result (it, bes property "Device Type") as lowercase = "server") of bes computer group whose (name of it = "${groupName}")`;
     try {
       const bfAuthOpts = await getBfAuthContext(req, ctx); 
       const res = await axios.get(`${BIGFIX_BASE_URL}/api/query`, { ...bfAuthOpts, params: { output: "json", relevance } });

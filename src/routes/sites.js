@@ -2,6 +2,7 @@ const express = require("express");
 const axios = require("axios");
 const xml2js = require("xml2js");
 const { getCtx } = require("../env");
+const { getAllowedSites } = require("../services/roleService");
 
 const router = express.Router();
 
@@ -40,11 +41,16 @@ router.get("/", async (req, res) => {
 
     const answers = parsed?.BESAPI?.Query?.Result?.Answer;
 
-    if (!answers) return res.json([]);
+    if (!answers) {
+      return res.json({
+        isMaster: false,
+        sites: []
+      });
+    }
 
     const answerArray = Array.isArray(answers) ? answers : [answers];
 
-    const sites = answerArray.map((value) => {
+    let sites = answerArray.map((value) => {
       const text = typeof value === "string" ? value : value._ || "";
 
       const type = text.includes("[Master]") ? "Master" : "Custom";
@@ -57,7 +63,40 @@ router.get("/", async (req, res) => {
       return { type, name };
     });
 
-    res.json(sites);
+    /* =========================
+       RBAC LOGIC
+    ========================= */
+
+    let allowedSites = [];
+
+    try {
+      allowedSites = await getAllowedSites(req, req.app.locals.ctx);
+    } catch (e) {
+      console.warn("[RBAC] Failed in sites API:", e.message);
+    }
+
+    const isMaster = allowedSites.includes("__ALL__");
+
+    if (!isMaster) {
+
+      const allowedSet = new Set(
+        allowedSites.map(s => s.toLowerCase().trim())
+      );
+
+      sites = sites.filter(s =>
+        s.type === "Custom" &&
+        allowedSet.has(s.name.toLowerCase().trim())
+      );
+    }
+
+    /* =========================
+       RESPONSE
+    ========================= */
+
+    res.json({
+      isMaster,
+      sites
+    });
   } catch (err) {
     console.error("Site fetch failed:", err.response?.data || err.message);
 

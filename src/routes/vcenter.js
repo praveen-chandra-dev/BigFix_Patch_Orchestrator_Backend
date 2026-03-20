@@ -15,7 +15,6 @@ function decodePassword(raw) {
     if (!raw) return "";
     try {
         // Simple check: if it looks like Base64 (no spaces, ends in = or alphanumeric), try decode
-        // Your password "RnJlZXNlcnZlciE1MjMxNg==" is definitely Base64
         if (/^[A-Za-z0-9+/=]+$/.test(raw) && raw.length % 4 === 0) {
              const decoded = Buffer.from(raw, 'base64').toString('utf-8');
              // Sanity check: verify it didn't turn into garbage
@@ -53,6 +52,11 @@ async function getRobustSession(url, user, passEncoded) {
 
 function attachVcenterRoutes(app, ctx) {
   const log = logFactory(ctx.DEBUG_LOG);
+  
+  // Expose ctx to app locals if not already present
+  if (!app.locals.ctx) {
+      app.locals.ctx = ctx;
+  }
 
   // --- PREPARE SAFE CONTEXT ---
   // We create a modified context where the password is pre-decoded.
@@ -67,7 +71,9 @@ function attachVcenterRoutes(app, ctx) {
   };
 
   const checkConfig = (req, res, next) => {
-    const hasUrl = ctx.VCENTER_URL || (ctx.vcenter && ctx.vcenter.VCENTER_URL);
+    // Dynamically pull context from app.locals to prevent scope loss
+    const currentCtx = req.app.locals.ctx || ctx;
+    const hasUrl = currentCtx.VCENTER_URL || (currentCtx.vcenter && currentCtx.vcenter.VCENTER_URL);
     if (!hasUrl) return res.status(503).json({ ok: false, error: "VCenter not configured." });
     next();
   };
@@ -104,7 +110,8 @@ function attachVcenterRoutes(app, ctx) {
     }
 
     try {
-      const { VCENTER_URL, VCENTER_USER, VCENTER_PASSWORD } = ctx.vcenter;
+      const currentCtx = req.app.locals.ctx || ctx;
+      const { VCENTER_URL, VCENTER_USER, VCENTER_PASSWORD } = currentCtx.vcenter;
       const cleanUrl = (VCENTER_URL || "").replace(/\/+$/, "");
 
       // 1. Login (Robust)
@@ -113,11 +120,6 @@ function attachVcenterRoutes(app, ctx) {
       // 2. Search
       // We use the REST API 'names' filter which is standard for VCenter 6.5+
       const searchUrl = `${cleanUrl}/rest/vcenter/vm?names=${encodeURIComponent(filter)}`;
-      
-      // Note: If you want wildcard search (e.g. 'test*'), VCenter REST API is strict.
-      // We often have to fetch list and filter in JS if exact match fails, 
-      // but for "Lookup" usually exact match or list is preferred.
-      // Trying exact match first:
       
       const vmRes = await axios.get(searchUrl, {
         httpsAgent: agent,
@@ -129,8 +131,6 @@ function attachVcenterRoutes(app, ctx) {
       if (vmRes.status === 200 && vmRes.data.value) {
           vms = vmRes.data.value;
       } else {
-          // Fallback: If filter failed, maybe try searching by IP?
-          // For now, return empty to prevent crash
           console.warn(`[VCenter Lookup] Search returned ${vmRes.status}`);
       }
       
@@ -144,7 +144,6 @@ function attachVcenterRoutes(app, ctx) {
 
     } catch (error) {
       console.error("[VCenter Lookup Error]:", error.message);
-      // Return 200 OK with error payload so Frontend displays "Connection Error" icon instead of crashing
       res.status(500).json({ ok: false, error: error.message });
     }
   });
@@ -253,7 +252,7 @@ function attachVcenterRoutes(app, ctx) {
     } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   });
 
-  // --- 6. HISTORY & VALIDATION (PRESERVED) ---
+  // --- 6. HISTORY & VALIDATION (FIXED SCOPE) ---
   app.get("/api/vcenter/history", async (req, res) => {
     try {
       const pool = await getPool();
@@ -265,7 +264,14 @@ function attachVcenterRoutes(app, ctx) {
   app.post("/api/vcenter/validate", async (req, res) => {
     const { groupName, lookbackHours = 24 } = req.body;
     try {
-      const bfClient = bigfixClient(ctx);
+      // FIX: Dynamically pull context from app.locals to prevent 'bigfix' undefined errors
+      const currentCtx = req.app.locals.ctx || ctx;
+      
+      if (!currentCtx || !currentCtx.bigfix) {
+          return res.status(500).json({ ok: false, error: "System context lost. Please restart the backend service." });
+      }
+
+      const bfClient = bigfixClient(req, currentCtx); 
       const members = await bfClient.getGroupMembers(groupName);
       if (!members || !members.length) return res.json({ ok: true, ready: false, error: "Group empty" });
 

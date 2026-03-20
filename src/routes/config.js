@@ -84,6 +84,8 @@ function attachConfigRoutes(app, ctx) {
       };
 
       const dsk = num(req.body?.diskThresholdGB) ?? num(req.body?.diskThreshold);
+      const st = num(req.body?.successThreshold);
+      const hf = num(req.body?.allowableCriticalHF);
 
       if (dsk === undefined || dsk < 0)
         return res.status(400).json({ ok:false, message:"diskGB must be >= 0" });
@@ -93,11 +95,9 @@ function attachConfigRoutes(app, ctx) {
       const postPatchVal    = bool(req.body?.postPatchMail);
       const checkServiceVal = bool(req.body?.checkServiceStatus ?? req.body?.checkService); 
       
-      // --- Handle Snapshot/Clone Flags ---
       const snapshotVal = bool(req.body?.snapshotVM);
       const cloneVal    = bool(req.body?.cloneVM);
 
-      // --- NEW: Handle Sandbox/Pilot Toggle Flags ---
       const enableSandboxVal = bool(req.body?.enableSandbox);
       const enablePilotVal   = bool(req.body?.enablePilot);
 
@@ -112,6 +112,8 @@ function attachConfigRoutes(app, ctx) {
 
       // Update In-Memory
       CONFIG.diskThresholdGB = dsk;
+      if (st !== undefined) CONFIG.successThreshold = st;
+      if (hf !== undefined) CONFIG.allowableCriticalHF = hf;
 
       if (requireChgVal !== undefined) CONFIG.requireChg  = requireChgVal;
       if (autoMailVal   !== undefined) CONFIG.autoMail    = autoMailVal;
@@ -121,14 +123,13 @@ function attachConfigRoutes(app, ctx) {
       if (snapshotVal !== undefined) CONFIG.snapshotVM = snapshotVal;
       if (cloneVal !== undefined)    CONFIG.cloneVM = cloneVal;
 
-      // --- NEW: Update Sandbox/Pilot Config ---
       if (enableSandboxVal !== undefined) CONFIG.enableSandbox = enableSandboxVal;
       if (enablePilotVal !== undefined)   CONFIG.enablePilot = enablePilotVal;
 
       if (reportValue !== undefined) CONFIG.lastReportValue = reportValue;
       if (reportUnit  !== undefined) CONFIG.lastReportUnit  = reportUnit;
 
-      // --- PERSIST TO DB ---
+      // PERSIST TO DB
       await saveConfigToDB(CONFIG, req, log);
 
       res.json({ ok: true, config: { ...CONFIG } });
@@ -139,4 +140,4 @@ function attachConfigRoutes(app, ctx) {
   });
 }
 
-module.exports = { attachConfigRoutes };
+module.exports = { attachConfigRoutes, saveConfigToDB, loadConfigFromDB };

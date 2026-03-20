@@ -4,15 +4,20 @@ const { getCtx } = require("../env");
 
 let cachedToken = null;
 let tokenExpiry = null;
+let tokenPromise = null;
 
 const httpsAgent = new https.Agent({
   rejectUnauthorized: false,
 });
 
 function decodeJwt(token) {
-  const payload = token.split(".")[1];
-  const decoded = Buffer.from(payload, "base64").toString("utf8");
-  return JSON.parse(decoded);
+  try {
+    const payload = token.split(".")[1];
+    const decoded = Buffer.from(payload, "base64").toString("utf8");
+    return JSON.parse(decoded);
+  } catch {
+    return {};
+  }
 }
 
 function isTokenExpired() {
@@ -25,27 +30,45 @@ async function getToken(forceRefresh = false) {
   if (!forceRefresh && cachedToken && !isTokenExpired()) {
     return cachedToken;
   }
-  try {
 
-    const ctx = getCtx();
-
-    const response = await axios.post(
-      `${ctx.prism.PRISM_BASE_URL}/api/v1/auth/token`,
-      {
-        username: ctx.prism.PRISM_USER,
-        password: ctx.prism.PRISM_PASS,
-      },
-      { httpsAgent }
-    );
-    cachedToken = response.data.access_token;
-    const decoded = decodeJwt(cachedToken);
-    tokenExpiry = decoded.exp;
-    console.log(`Prism token refreshed. Expires at: ${new Date(tokenExpiry * 1000).toISOString()}`);
-    return cachedToken;
-  } catch (error) {
-    console.error("Token fetch failed:", error.message);
-    throw new Error("Failed to authenticate with Prism API");
+  if (tokenPromise) {
+    return tokenPromise;
   }
+
+  tokenPromise = (async () => {
+    try {
+      const ctx = getCtx();
+
+      const response = await axios.post(
+        `${ctx.prism.PRISM_BASE_URL}/api/v1/auth/token`,
+        {
+          username: ctx.prism.PRISM_USER,
+          password: ctx.prism.PRISM_PASS,
+        },
+        { httpsAgent }
+      );
+
+      cachedToken = response.data.access_token;
+
+      const decoded = decodeJwt(cachedToken);
+      tokenExpiry = decoded.exp;
+
+      console.log(
+        `Prism token refreshed. Expires at: ${new Date(
+          tokenExpiry * 1000
+        ).toISOString()}`
+      );
+
+      return cachedToken;
+    } catch (error) {
+      console.error("Token fetch failed:", error.message);
+      throw new Error("Failed to authenticate with Prism API");
+    } finally {
+      tokenPromise = null;
+    }
+  })();
+
+  return tokenPromise;
 }
 
 async function prismRequest(config, retry = true) {
@@ -54,6 +77,7 @@ async function prismRequest(config, retry = true) {
     const response = await axios({
       ...config,
       httpsAgent,
+      timeout: 15000,
       headers: {
         ...(config.headers || {}),
         Authorization: `Bearer ${token}`,
@@ -61,11 +85,8 @@ async function prismRequest(config, retry = true) {
     });
     return response;
   } catch (error) {
-    if (error.response && error.response.status === 401 && retry) {
-      console.log("401 detected. Forcing token refresh...");
-      cachedToken = null;
-      tokenExpiry = null;
-      await getToken(true);
+    if (!error.response && retry) {
+      console.log("Retrying request...");
       return prismRequest(config, false);
     }
     throw error;
@@ -74,26 +95,42 @@ async function prismRequest(config, retry = true) {
 
 async function getPatches() {
   try {
-    let page = 1;
-    let totalPages = 1;
-    let allPatches = [];
+    const ctx = getCtx();
 
-    while (page <= totalPages) {
-      const response = await prismRequest({
-        method: "GET",
-        url: `${process.env.PRISM_BASE_URL}/api/v1/patches`,
-        params: { page, limit: 100 },
+    const first = await prismRequest({
+      method: "GET",
+      url: `${ctx.prism.PRISM_BASE_URL}/api/v1/patches`,
+      params: { page: 1, limit: 100 },
+    });
+
+    let allPatches = [...first.data.data];
+    const totalPages = first.data.pagination.total_pages;
+
+    if (totalPages > 1) {
+      const requests = [];
+
+      for (let page = 2; page <= totalPages; page++) {
+        requests.push(
+          prismRequest({
+            method: "GET",
+            url: `${ctx.prism.PRISM_BASE_URL}/api/v1/patches`,
+            params: { page, limit: 100 },
+          })
+        );
+      }
+
+      const responses = await Promise.all(requests);
+
+      responses.forEach((res) => {
+        allPatches.push(...res.data.data);
       });
-      const data = response.data.data;
-      const pagination = response.data.pagination;
-      allPatches = [...allPatches, ...data];
-      totalPages = pagination.total_pages;
-      page++;
     }
+
     return allPatches.map((p) => ({
       ...p,
       applicable_computers: safeParse(p.applicable_computers),
-      final_score: Number(p.final_score || 0),
+      final_score: p.final_score != null ? Number(p.final_score) : null,
+      status: p.status ?? 0,
     }));
   } catch (error) {
     console.error("Patch fetch failed:", error.message);

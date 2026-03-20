@@ -85,7 +85,8 @@ function attachHealthRoutes(app, ctx) {
       const baseComp = getBaseComputers(req.query.group);
       const filter = await getRoleFilter(req, ctx);
       
-      const relevance = `number of ${baseComp}${filter}`;
+      // FIX: Wrap baseComp in parenthesis to safely evaluate before applying role-based filter
+      const relevance = `number of (${baseComp})${filter}`;
       const url = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(relevance)}`;
       
       const bfAuthOpts = await getBfAuthContext(req, ctx); 
@@ -124,14 +125,14 @@ function attachHealthRoutes(app, ctx) {
       const baseComp = getBaseComputers(req.query.group);
       const filter = await getRoleFilter(req, ctx);
       
-      // CRITICAL FIX: Changed 'bes properties' to 'bes property' to prevent Fatal BigFix Evaluation Error
+      // FIX: Wrap baseComp in parenthesis to safely evaluate before applying role-based filter
       const relevance = '((name of it | "N/A") ,' + 
         ' (value of result (it, bes property "Patch_Setu_Disk_Space") | "N/A"),' +
         ' (value of result (it, bes property "Patch_Setu_IP_Address") | "N/A"),' +
         ' (last report time of it as string | "N/A"),' + 
         ' (value of result (it, bes property "Patch_Setu_Window_Update_Service") | "N/A"),' +
         ' (operating system of it | "N/A"))' +
-        ` of ${baseComp}${filter}`;
+        ` of (${baseComp})${filter}`;
         
       const url = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(relevance)}`;
       
@@ -180,7 +181,7 @@ function attachHealthRoutes(app, ctx) {
       const baseComp = getBaseComputers(req.query.group);
       const filter = await getRoleFilter(req, ctx);
       
-      // CRITICAL FIX: Changed 'bes properties' to 'bes property' to prevent Fatal BigFix Evaluation Error
+      // FIX: Wrap baseComp in parenthesis to safely evaluate before applying role-based filter
       const relevance = '((name of it | "N/A"), ' +
         '(value of result (it, bes property "Patch_Setu_Pending_Restart") | "N/A"), ' +
         '(last report time of it as string | "N/A"), ' +
@@ -188,7 +189,7 @@ function attachHealthRoutes(app, ctx) {
         '(value of result (it, bes property "Patch_Setu_IP_Address") | "N/A"), ' +
         '(value of result (it, bes property "Patch_Setu_UpTime") | "N/A"), ' +
         '(value of result (it, bes property "BES Relay Service Installed") | "N/A")) ' +
-        `of ${baseComp}${filter}`;
+        `of (${baseComp})${filter}`;
         
       const url = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(relevance)}`;
       
