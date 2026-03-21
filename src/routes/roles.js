@@ -14,7 +14,6 @@ function isAdmin(req) {
 
 const xmlEscape = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
-// Client Relevance mapping for Computer Assignments
 const propToRelevanceMap = {
     "bes relay selection method": 'relay selection method of client',
     "computer name": 'computer name',
@@ -31,17 +30,54 @@ const propToRelevanceMap = {
     "active directory path": 'active directory path of client'
 };
 
-// 1. Fetch Local Roles
+// 1. Fetch ALL Roles natively from BigFix and merge with local DB
 router.get('/api/roles', async (req, res) => {
     if (!isAdmin(req)) return res.status(403).json({ ok: false, error: 'Forbidden' });
     try {
+        const bfAuthOpts = await getBfAuthContext(req, req.app.locals.ctx);
+        const { BIGFIX_BASE_URL } = req.app.locals.ctx.bigfix;
+        
+        const url = joinUrl(BIGFIX_BASE_URL, "/api/roles");
+        const bfResp = await axios.get(url, { ...bfAuthOpts, headers: { Accept: "application/xml" }, validateStatus: () => true });
+        
+        let bfRoles = [];
+        if (bfResp.status === 200) {
+            const xmlData = String(bfResp.data || "");
+            const roleBlocks = xmlData.split("</Role>");
+            for (const block of roleBlocks) {
+                const idMatch = block.match(/<ID>(\d+)<\/ID>/i);
+                const nameMatch = block.match(/<Name>(.*?)<\/Name>/i);
+                if (idMatch && nameMatch) {
+                    bfRoles.push({
+                        BigFixRoleID: parseInt(idMatch[1], 10),
+                        Name: nameMatch[1].trim()
+                    });
+                }
+            }
+        }
+
         const pool = await getPool();
-        const rs = await pool.request().query('SELECT * FROM dbo.BES_ROLES ORDER BY CreatedAt DESC');
-        res.json({ ok: true, roles: rs.recordset });
+        const rs = await pool.request().query('SELECT * FROM dbo.BES_ROLES');
+        const dbRolesMap = {};
+        rs.recordset.forEach(r => dbRolesMap[r.BigFixRoleID] = r);
+
+        const finalRoles = bfRoles.map(bfr => {
+            const dbInfo = dbRolesMap[bfr.BigFixRoleID] || {};
+            return {
+                RoleID: dbInfo.RoleID || bfr.BigFixRoleID,
+                BigFixRoleID: bfr.BigFixRoleID,
+                Name: bfr.Name,
+                Description: dbInfo.Description || "—",
+                CreatedBy: dbInfo.CreatedBy || "BigFix Console",
+                CreatedAt: dbInfo.CreatedAt || new Date().toISOString()
+            };
+        });
+
+        finalRoles.sort((a, b) => new Date(b.CreatedAt) - new Date(a.CreatedAt));
+        res.json({ ok: true, roles: finalRoles });
     } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
-// 2. Check if User exists in BigFix
 router.get('/api/roles/check-operator/:username', async (req, res) => {
     if (!isAdmin(req)) return res.status(403).json({ ok: false, error: 'Forbidden' });
     try {
@@ -58,7 +94,6 @@ router.get('/api/roles/check-operator/:username', async (req, res) => {
     } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
-// 3. Get Properties for Tree (Pulls EXACT Resource URLs via REST API)
 router.get('/api/roles/properties', async (req, res) => {
     try {
         const bfAuthOpts = await getBfAuthContext(req, req.app.locals.ctx);
@@ -98,7 +133,6 @@ router.get('/api/roles/properties', async (req, res) => {
     } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
-// 4. Unified Filtered Relevance Endpoint (Handles Deep Drilldowns)
 router.post('/api/roles/property-values-filtered', async (req, res) => {
     try {
         const { targetProp, filters } = req.body;
@@ -133,7 +167,6 @@ router.post('/api/roles/property-values-filtered', async (req, res) => {
     } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
-// 5. Get Total Computers
 router.get('/api/roles/computers/count', async (req, res) => {
     try {
         const bfAuthOpts = await getBfAuthContext(req, req.app.locals.ctx);
@@ -144,7 +177,6 @@ router.get('/api/roles/computers/count', async (req, res) => {
     } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
-// 6. Get All Sites 
 router.get('/api/roles/sites', async (req, res) => {
     try {
         const bfAuthOpts = await getBfAuthContext(req, req.app.locals.ctx);
@@ -173,9 +205,6 @@ router.get('/api/roles/sites', async (req, res) => {
     } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
-// ==========================================
-// XML HELPER FUNCTIONS
-// ==========================================
 function parseRoleXml(xml) {
     const extract = (tag) => {
         const m = xml.match(new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`, 'i'));
@@ -234,7 +263,7 @@ function buildRoleXml(data) {
             }
         }).join("");
         compXml = `\n<ComputerAssignments>${conds}\n</ComputerAssignments>`;
-    } // Omit completely if empty
+    }
 
     let siteXml = "";
     if (data.sites && data.sites.length > 0) {
@@ -244,13 +273,13 @@ function buildRoleXml(data) {
             return `<${tag}>\n<Name>${xmlEscape(s.name)}</Name>\n<Permission>${xmlEscape(perm)}</Permission>\n</${tag}>`;
         }).join("");
         siteXml = `\n<Sites>\n${siteElements}\n</Sites>`;
-    } // Omit completely if empty
+    }
 
     let opXml = "";
     if (data.operators && data.operators.length > 0) {
         const opElements = data.operators.map(op => `<Explicit>${xmlEscape(op)}</Explicit>`).join("\n");
         opXml = `\n<Operators>\n${opElements}\n</Operators>`;
-    } // Omit completely if empty
+    }
 
     return `<?xml version="1.0" encoding="UTF-8"?>
     <BESAPI xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="BESAPI.xsd">
@@ -277,7 +306,6 @@ function buildRoleXml(data) {
     </BESAPI>`;
 }
 
-// 7. Create Role
 router.post('/api/roles/create', async (req, res) => {
     if (!isAdmin(req)) return res.status(403).json({ ok: false, error: 'Forbidden' });
     try {
@@ -313,7 +341,6 @@ router.post('/api/roles/create', async (req, res) => {
     }
 });
 
-// 8. Fetch specific Role logic for the Front-End Editor
 router.get('/api/roles/:id/details', async (req, res) => {
     if (!isAdmin(req)) return res.status(403).json({ ok: false, error: 'Forbidden' });
     try {
@@ -330,7 +357,6 @@ router.get('/api/roles/:id/details', async (req, res) => {
     }
 });
 
-// 9. Isolated PUT Endpoint to commit parts to Role XML (Order-Preserving)
 router.put('/api/roles/:id', async (req, res) => {
     if (!isAdmin(req)) return res.status(403).json({ ok: false, error: 'Forbidden' });
     try {
@@ -339,11 +365,9 @@ router.put('/api/roles/:id', async (req, res) => {
         const { BIGFIX_BASE_URL } = req.app.locals.ctx.bigfix;
         const url = joinUrl(BIGFIX_BASE_URL, `/api/role/${req.params.id}`);
 
-        // 1. Fetch current XML structure
         const resp = await axios.get(url, { ...bfAuthOpts, timeout: 15000 });
         const existingData = parseRoleXml(String(resp.data));
 
-        // 2. Overwrite with provided changes
         if (details) {
             existingData.name = details.name;
             existingData.description = details.description;
@@ -353,12 +377,10 @@ router.put('/api/roles/:id', async (req, res) => {
         if (sites) existingData.sites = sites;
         if (operators) existingData.operators = operators;
 
-        // 3. Generate correct XSD sequence XML
         const newXml = buildRoleXml(existingData);
 
         await axios.put(url, newXml, { ...bfAuthOpts, timeout: 20000, headers: { "Content-Type": "application/xml" }});
 
-        // 4. Update local DB if name/desc changed
         if (details) {
             const pool = await getPool();
             await pool.request()

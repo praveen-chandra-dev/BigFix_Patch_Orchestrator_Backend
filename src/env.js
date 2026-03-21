@@ -43,12 +43,15 @@ function toEnvContent(dict, order = []) {
 const UI_KEYS = new Set([
   "PORT",
   "BIGFIX_ALLOW_SELF_SIGNED", "BIGFIX_BASE_URL", "BIGFIX_USER", "BIGFIX_PASS",
+  "SANDBOX_BIGFIX_ALLOW_SELF_SIGNED", "SANDBOX_BIGFIX_BASE_URL", "SANDBOX_BIGFIX_USER", "SANDBOX_BIGFIX_PASS",
+  "PILOT_BIGFIX_ALLOW_SELF_SIGNED", "PILOT_BIGFIX_BASE_URL", "PILOT_BIGFIX_USER", "PILOT_BIGFIX_PASS",
+  "PRODUCTION_BIGFIX_ALLOW_SELF_SIGNED", "PRODUCTION_BIGFIX_BASE_URL", "PRODUCTION_BIGFIX_USER", "PRODUCTION_BIGFIX_PASS",
   "SN_ALLOW_SELF_SIGNED", "SN_URL", "SN_USER", "SN_PASSWORD",
   "VCENTER_URL", "VCENTER_USER", "VCENTER_PASSWORD", "VCENTER_ALLOW_SELF_SIGNED",
   "SMTP_ALLOW_SELF_SIGNED", "SMTP_HOST", "SMTP_PORT", "SMTP_SECURE",
   "SMTP_FROM", "SMTP_TO", "SMTP_CC", "SMTP_BCC",
   "SMTP_USER", "SMTP_PASSWORD",
-  "LDAP_ENABLED", "LDAP_URL", "LDAP_DOMAIN", "LDAP_ALLOW_SELF_SIGNED", // <--- LDAP Keys
+  "LDAP_ENABLED", "LDAP_URL", "LDAP_DOMAIN", "LDAP_ALLOW_SELF_SIGNED",
   "DEBUG_LOG",
 ]);
 
@@ -65,7 +68,9 @@ function writeEnvFull(fullDict) {
 
 /* ---------------- runtime cfg + ctx ---------------- */
 const SECRET_KEYS = new Set([
-  "BIGFIX_PASS", "SN_PASSWORD", "SMTP_PASSWORD", "SQL_SERVER_AUTHENTICATION_PASSWORD", "VCENTER_PASSWORD", "PRISM_PASS"
+  "BIGFIX_PASS", "SANDBOX_BIGFIX_PASS", "PILOT_BIGFIX_PASS", "PRODUCTION_BIGFIX_PASS",
+  "SN_PASSWORD", "SMTP_PASSWORD", "VCENTER_PASSWORD", "PRISM_PASS",
+  "SQL_SERVER_AUTHENTICATION_PASSWORD" // <-- added back
 ]);
 
 function b64d(val) {
@@ -93,6 +98,25 @@ function computeMissing(dict) {
   return miss;
 }
 
+/**
+ * Load stage-specific BigFix config, falling back to root values if stage is not configured.
+ */
+function getStageConfig(dictRaw, stage) {
+  const prefix = stage.toUpperCase();
+  const baseUrl = dictRaw[`${prefix}_BIGFIX_BASE_URL`] || dictRaw.BIGFIX_BASE_URL;
+  const username = dictRaw[`${prefix}_BIGFIX_USER`] || dictRaw.BIGFIX_USER;
+  let password = dictRaw[`${prefix}_BIGFIX_PASS`];
+  if (password === undefined) password = dictRaw.BIGFIX_PASS;
+  const allowSelfSigned = bool(dictRaw[`${prefix}_BIGFIX_ALLOW_SELF_SIGNED`], bool(dictRaw.BIGFIX_ALLOW_SELF_SIGNED));
+
+  return {
+    BIGFIX_BASE_URL: baseUrl,
+    BIGFIX_USER: username,
+    BIGFIX_PASS: password,
+    BIGFIX_ALLOW_SELF_SIGNED: allowSelfSigned,
+  };
+}
+
 function buildCfg(dictRaw) {
   const decoded = { ...dictRaw };
   for (const k of SECRET_KEYS) if (k in decoded) decoded[k] = b64d(decoded[k]);
@@ -103,16 +127,27 @@ function buildCfg(dictRaw) {
   const port = decoded.PORT || process.env.PORT || 5174;
   const baseUrl = `http://localhost:${port}`;
 
-  const cfg = {
-    PORT: port,
-    FRONTEND_DIR: frontEndDir, // <--- Config key exists
-    FRONTEND_URL: decoded.FRONTEND_URL || baseUrl,
-    BACKEND_URL: decoded.BACKEND_URL || baseUrl,
-
+  const rootBigFix = {
     BIGFIX_BASE_URL: decoded.BIGFIX_BASE_URL || "",
     BIGFIX_USER: decoded.BIGFIX_USER || "",
     BIGFIX_PASS: decoded.BIGFIX_PASS || "",
     BIGFIX_ALLOW_SELF_SIGNED: bool(decoded.BIGFIX_ALLOW_SELF_SIGNED, false),
+  };
+
+  const sandbox = getStageConfig(decoded, "sandbox");
+  const pilot = getStageConfig(decoded, "pilot");
+  const production = getStageConfig(decoded, "production");
+
+  const cfg = {
+    PORT: port,
+    FRONTEND_DIR: frontEndDir,
+    FRONTEND_URL: decoded.FRONTEND_URL || baseUrl,
+    BACKEND_URL: decoded.BACKEND_URL || baseUrl,
+
+    ...rootBigFix,
+    sandbox,
+    pilot,
+    production,
 
     PRISM_BASE_URL: decoded.PRISM_BASE_URL || "",
     PRISM_USER: decoded.PRISM_USER || "",
@@ -128,7 +163,6 @@ function buildCfg(dictRaw) {
     VCENTER_PASSWORD: decoded.VCENTER_PASSWORD || "",
     VCENTER_ALLOW_SELF_SIGNED: bool(decoded.VCENTER_ALLOW_SELF_SIGNED, false),
 
-    // --- LDAP CONFIG ---
     LDAP_ENABLED: bool(decoded.LDAP_ENABLED, false),
     LDAP_URL: decoded.LDAP_URL || "",
     LDAP_DOMAIN: decoded.LDAP_DOMAIN || "",
@@ -156,26 +190,40 @@ function buildCfg(dictRaw) {
 
   const ctx = {
     cfg: cfg,
-    frontend: {
-      FRONTEND_DIR: cfg.FRONTEND_DIR // <--- CRITICAL FIX: Ensure this object exists
-    },
+    frontend: { FRONTEND_DIR: cfg.FRONTEND_DIR },
     bigfix: {
       BIGFIX_BASE_URL: cfg.BIGFIX_BASE_URL,
       BIGFIX_USER: cfg.BIGFIX_USER,
       BIGFIX_PASS: cfg.BIGFIX_PASS,
       httpsAgent: new https.Agent({ rejectUnauthorized: !cfg.BIGFIX_ALLOW_SELF_SIGNED }),
     },
+    bigfixSandbox: {
+      BIGFIX_BASE_URL: cfg.sandbox.BIGFIX_BASE_URL,
+      BIGFIX_USER: cfg.sandbox.BIGFIX_USER,
+      BIGFIX_PASS: cfg.sandbox.BIGFIX_PASS,
+      httpsAgent: new https.Agent({ rejectUnauthorized: !cfg.sandbox.BIGFIX_ALLOW_SELF_SIGNED }),
+    },
+    bigfixPilot: {
+      BIGFIX_BASE_URL: cfg.pilot.BIGFIX_BASE_URL,
+      BIGFIX_USER: cfg.pilot.BIGFIX_USER,
+      BIGFIX_PASS: cfg.pilot.BIGFIX_PASS,
+      httpsAgent: new https.Agent({ rejectUnauthorized: !cfg.pilot.BIGFIX_ALLOW_SELF_SIGNED }),
+    },
+    bigfixProduction: {
+      BIGFIX_BASE_URL: cfg.production.BIGFIX_BASE_URL,
+      BIGFIX_USER: cfg.production.BIGFIX_USER,
+      BIGFIX_PASS: cfg.production.BIGFIX_PASS,
+      httpsAgent: new https.Agent({ rejectUnauthorized: !cfg.production.BIGFIX_ALLOW_SELF_SIGNED }),
+    },
     servicenow: {
       SN_URL: cfg.SN_URL, SN_USER: cfg.SN_USER, SN_PASSWORD: cfg.SN_PASSWORD,
       SN_ALLOW_SELF_SIGNED: cfg.SN_ALLOW_SELF_SIGNED,
     },
-
     prism: {
       PRISM_BASE_URL: cfg.PRISM_BASE_URL,
       PRISM_USER: cfg.PRISM_USER,
       PRISM_PASS: cfg.PRISM_PASS
     },
-
     vcenter: {
       VCENTER_URL: cfg.VCENTER_URL,
       VCENTER_USER: cfg.VCENTER_USER,

@@ -44,7 +44,6 @@ function attachBaselineRoutes(app, ctx) {
     } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   });
 
-  // FIXED: Explicitly separated custom-sites endpoint to never show external sites
   app.get("/api/baseline/custom-sites", async (req, res) => {
     try {
         const activeRole = req.headers['x-user-role'] || getSessionRole(req);
@@ -80,7 +79,8 @@ function attachBaselineRoutes(app, ctx) {
             else siteFilter = ` whose (name of site of it as lowercase = "action site" or name of site of it as lowercase = "master action site")`;
         }
 
-        const relevance = `(id of it as string & "||" & name of it) of bes baselines${siteFilter}`;
+        // EXACT MAPPING: Get ID, Name, SiteType, and SiteName to bypass relevance caching later
+        const relevance = `(id of it as string & "||" & name of it & "||" & (if (name of site of it as lowercase contains "action") then "master" else "custom") & "||" & (if (name of site of it as lowercase starts with "customsite_") then (substring (11, length of name of site of it) of name of site of it) else name of site of it)) of bes baselines${siteFilter}`;
         const bfAuthOpts = await getBfAuthContext(req, ctx);
         const url = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(relevance)}`;
         
@@ -90,7 +90,7 @@ function attachBaselineRoutes(app, ctx) {
             const raw = Array.isArray(resp.data.result) ? resp.data.result : [resp.data.result];
             baselines = raw.map(r => {
                 const parts = String(r).split("||");
-                return { id: parts[0], name: parts[1] };
+                return { id: parts[0], name: parts[1], siteType: parts[2], siteName: parts[3] };
             });
         }
         baselines.sort((a, b) => a.name.localeCompare(b.name));

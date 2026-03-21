@@ -1,109 +1,84 @@
+// src/routes/sites.js
 const express = require("express");
 const axios = require("axios");
-const xml2js = require("xml2js");
 const { getCtx } = require("../env");
-const { getAllowedSites } = require("../services/roleService");
+const { getRoleAssets, isMasterOperator } = require("../services/bigfix");
 
 const router = express.Router();
+
+function getSessionUser(req) {
+    if (req && req.cookies && req.cookies.auth_session) {
+        try { return JSON.parse(req.cookies.auth_session).username; } catch(e){}
+    }
+    return req.headers['x-active-user'] || "unknown";
+}
+
+function getSessionRole(req) {
+    if (req && req.cookies && req.cookies.auth_session) {
+        try { return JSON.parse(req.cookies.auth_session).role; } catch(e){}
+    }
+    return null;
+}
 
 router.get("/", async (req, res) => {
   try {
     const ctx = getCtx();
-
     const bfUrl = (ctx.cfg?.BIGFIX_BASE_URL || "").replace(/\/$/, "");
     const bfUser = ctx.cfg?.BIGFIX_USER;
     const bfPass = ctx.cfg?.BIGFIX_PASS;
-
     const httpsAgent = ctx.bigfix?.httpsAgent;
 
-    const relevance =
-      `(it as string) of (if master site flag of it then "[Master] " & name of it else "[Custom] " & name of it) of all bes sites whose (master site flag of it or custom site flag of it)`;
+    // Use Master credentials to fetch all sites with their internal & display names
+    const masterAuth = { username: bfUser, password: bfPass };
 
+    const relevance = `(it as string) of (if master site flag of it then "[Master] ||" & name of it & "||" & (if exists display name of it then display name of it as string else name of it as string) else if custom site flag of it then "[Custom] ||" & name of it & "||" & (if exists display name of it then display name of it as string else name of it as string) else "[External] ||" & name of it & "||" & (if exists display name of it then display name of it as string else name of it as string)) of all bes sites`;
     const encodedRelevance = encodeURIComponent(relevance);
 
-    const response = await axios.get(
-      `${bfUrl}/api/query?relevance=${encodedRelevance}`,
-      {
-        httpsAgent,
-        auth: {
-          username: bfUser,
-          password: bfPass,
-        },
-      }
-    );
-
-    const parser = new xml2js.Parser({
-      explicitArray: false,
-      mergeAttrs: true,
+    const response = await axios.get(`${bfUrl}/api/query?relevance=${encodedRelevance}`, {
+        httpsAgent, auth: masterAuth
     });
 
-    const parsed = await parser.parseStringPromise(response.data);
+    const xml = String(response.data);
+    const matches = [...xml.matchAll(/<Answer>([\s\S]*?)<\/Answer>/gi)];
 
-    const answers = parsed?.BESAPI?.Query?.Result?.Answer;
+    let sites = matches.map((m) => {
+      const text = m[1].trim();
+      const parts = text.split("||");
+      
+      let type = "External";
+      if (parts[0].includes("[Master]")) type = "Master";
+      else if (parts[0].includes("[Custom]")) type = "Custom";
 
-    if (!answers) {
-      return res.json({
-        isMaster: false,
-        sites: []
-      });
-    }
+      const internalName = (parts[1] || "").trim();
+      const displayName = (parts[2] || internalName).trim();
 
-    const answerArray = Array.isArray(answers) ? answers : [answers];
-
-    let sites = answerArray.map((value) => {
-      const text = typeof value === "string" ? value : value._ || "";
-
-      const type = text.includes("[Master]") ? "Master" : "Custom";
-
-      const name = text
-        .replace("[Master] ", "")
-        .replace("[Custom] ", "")
-        .trim();
-
-      return { type, name };
+      return { type, name: internalName, displayName };
     });
 
     /* =========================
        RBAC LOGIC
     ========================= */
+    const activeUser = getSessionUser(req);
+    const activeRole = req.headers['x-user-role'] || getSessionRole(req);
+    const isMO = await isMasterOperator(req, ctx, activeUser);
 
-    let allowedSites = [];
+    if (!isMO) {
+      const roleAssets = await getRoleAssets(req, ctx, activeRole);
+      const allowedSet = new Set([
+          ...(roleAssets.customSites || []),
+          ...(roleAssets.externalSites || [])
+      ].map(s => s.toLowerCase().trim()));
 
-    try {
-      allowedSites = await getAllowedSites(req, req.app.locals.ctx);
-    } catch (e) {
-      console.warn("[RBAC] Failed in sites API:", e.message);
-    }
-
-    const isMaster = allowedSites.includes("__ALL__");
-
-    if (!isMaster) {
-
-      const allowedSet = new Set(
-        allowedSites.map(s => s.toLowerCase().trim())
-      );
-
-      sites = sites.filter(s =>
-        s.type === "Custom" &&
-        allowedSet.has(s.name.toLowerCase().trim())
+      sites = sites.filter(s => 
+          allowedSet.has(s.name.toLowerCase().trim()) || 
+          allowedSet.has(s.displayName.toLowerCase().trim())
       );
     }
 
-    /* =========================
-       RESPONSE
-    ========================= */
-
-    res.json({
-      isMaster,
-      sites
-    });
+    res.json({ isMaster: isMO, sites });
   } catch (err) {
     console.error("Site fetch failed:", err.response?.data || err.message);
-
-    res.status(500).json({
-      error: "Failed to fetch sites",
-      details: err.message,
-    });
+    res.status(500).json({ error: "Failed to fetch sites", details: err.message });
   }
 });
 

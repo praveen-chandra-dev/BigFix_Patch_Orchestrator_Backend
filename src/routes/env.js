@@ -5,11 +5,31 @@ const { readEnvFile, saveEnvAndReload } = require("../env");
 const { updateConsoleLogLevel } = require('../services/logger');
 
 const UI_TO_ENV = {
+  // Root BigFix
   "BIGFIX BASE URL": "BIGFIX_BASE_URL",
   "BIGFIX API USERNAME": "BIGFIX_USER",
   "BIGFIX API PASSWORD": "BIGFIX_PASS",
   "BIGFIX ALLOW SELF SIGNED": "BIGFIX_ALLOW_SELF_SIGNED",
 
+  // Sandbox stage
+  "SANDBOX BIGFIX BASE URL": "SANDBOX_BIGFIX_BASE_URL",
+  "SANDBOX BIGFIX API USERNAME": "SANDBOX_BIGFIX_USER",
+  "SANDBOX BIGFIX API PASSWORD": "SANDBOX_BIGFIX_PASS",
+  "SANDBOX BIGFIX ALLOW SELF SIGNED": "SANDBOX_BIGFIX_ALLOW_SELF_SIGNED",
+
+  // Pilot stage
+  "PILOT BIGFIX BASE URL": "PILOT_BIGFIX_BASE_URL",
+  "PILOT BIGFIX API USERNAME": "PILOT_BIGFIX_USER",
+  "PILOT BIGFIX API PASSWORD": "PILOT_BIGFIX_PASS",
+  "PILOT BIGFIX ALLOW SELF SIGNED": "PILOT_BIGFIX_ALLOW_SELF_SIGNED",
+
+  // Production stage
+  "PRODUCTION BIGFIX BASE URL": "PRODUCTION_BIGFIX_BASE_URL",
+  "PRODUCTION BIGFIX API USERNAME": "PRODUCTION_BIGFIX_USER",
+  "PRODUCTION BIGFIX API PASSWORD": "PRODUCTION_BIGFIX_PASS",
+  "PRODUCTION BIGFIX ALLOW SELF SIGNED": "PRODUCTION_BIGFIX_ALLOW_SELF_SIGNED",
+
+  // Existing settings (unchanged)
   "SMTP HOST": "SMTP_HOST",
   "EMAIL FROM": "SMTP_FROM",
   "EMAIL TO": "SMTP_TO",
@@ -31,7 +51,6 @@ const UI_TO_ENV = {
   "VCENTER PASSWORD": "VCENTER_PASSWORD",
   "VCENTER ALLOW SELF SIGNED": "VCENTER_ALLOW_SELF_SIGNED",
   
-  // --- LDAP ---
   "LDAP ENABLED": "LDAP_ENABLED",
   "LDAP URL": "LDAP_URL",
   "LDAP DOMAIN": "LDAP_DOMAIN",
@@ -40,7 +59,16 @@ const UI_TO_ENV = {
   "DEBUG LEVEL": "DEBUG_LOG",
 };
 
-const SECRET_KEYS = new Set(["BIGFIX_PASS", "SN_PASSWORD", "SMTP_PASSWORD", "VCENTER_PASSWORD"]);
+const SECRET_KEYS = new Set([
+  "BIGFIX_PASS",
+  "SANDBOX_BIGFIX_PASS",
+  "PILOT_BIGFIX_PASS",
+  "PRODUCTION_BIGFIX_PASS",
+  "SN_PASSWORD",
+  "SMTP_PASSWORD",
+  "VCENTER_PASSWORD"
+]);
+
 const b64e = (s) => Buffer.from(String(s ?? ""), "utf8").toString("base64");
 const normalizeDebugLevel = (v) => (String(v || 'info').toLowerCase() === '1' || String(v).toLowerCase() === 'debug') ? '1' : '0';
 
@@ -90,6 +118,31 @@ router.get("/env/status", (req, res) => {
     res.json({ ok: true, configured: Boolean(dict.BIGFIX_BASE_URL) });
   } catch {
     res.status(500).json({ ok: false, configured: false, error: "read_failed" });
+  }
+});
+
+// New endpoint: replicate root BigFix settings to all stages and save
+router.post("/env/replicate-bigfix", async (req, res) => {
+  try {
+    const current = envDictRaw();
+    const updates = {
+      "SANDBOX_BIGFIX_BASE_URL": current.BIGFIX_BASE_URL,
+      "SANDBOX_BIGFIX_USER": current.BIGFIX_USER,
+      "SANDBOX_BIGFIX_PASS": current.BIGFIX_PASS,
+      "SANDBOX_BIGFIX_ALLOW_SELF_SIGNED": current.BIGFIX_ALLOW_SELF_SIGNED,
+      "PILOT_BIGFIX_BASE_URL": current.BIGFIX_BASE_URL,
+      "PILOT_BIGFIX_USER": current.BIGFIX_USER,
+      "PILOT_BIGFIX_PASS": current.BIGFIX_PASS,
+      "PILOT_BIGFIX_ALLOW_SELF_SIGNED": current.BIGFIX_ALLOW_SELF_SIGNED,
+      "PRODUCTION_BIGFIX_BASE_URL": current.BIGFIX_BASE_URL,
+      "PRODUCTION_BIGFIX_USER": current.BIGFIX_USER,
+      "PRODUCTION_BIGFIX_PASS": current.BIGFIX_PASS,
+      "PRODUCTION_BIGFIX_ALLOW_SELF_SIGNED": current.BIGFIX_ALLOW_SELF_SIGNED,
+    };
+    saveEnvAndReload(updates);
+    res.json({ ok: true, message: "Root BigFix settings replicated to Sandbox, Pilot, and Production" });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
   }
 });
 
