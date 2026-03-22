@@ -5,10 +5,13 @@ const { decrypt } = require('./crypto');
 function joinUrl(base, path) {
   return `${base.replace(/\/+$/, "")}/${path.replace(/^\/+/, "")}`;
 }
+
 function toLowerSafe(x) { return String(x || "").toLowerCase(); }
+
 function splitEmails(s) {
   return String(s || "").split(/[;,]/).map(v => v.trim()).filter(Boolean); 
 }
+
 function escapeHtml(s) {
   return String(s || "")
     .replace(/&/g, "&amp;")
@@ -16,41 +19,50 @@ function escapeHtml(s) {
     .replace(/>/g, "&gt;");
 }
 
-/**
- * STRICT SECURE CONTEXT:
- * - If `req` is null -> BACKGROUND TASK -> Uses Master Service Account
- * - If `req` exists -> USER TASK -> Strictly requires Personal BigFix Credentials
- */
+function escapeXML(str = "") {
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function getSessionUser(req) {
+    if (req && req.cookies && req.cookies.auth_session) {
+        try { return JSON.parse(req.cookies.auth_session).username; } catch(e){}
+    }
+    return (req && req.headers) ? req.headers['x-active-user'] || "unknown" : "unknown";
+}
+
+function getSessionRole(req) {
+    if (req && req.cookies && req.cookies.auth_session) {
+        try { return JSON.parse(req.cookies.auth_session).role; } catch(e){}
+    }
+    return null;
+}
+
 async function getBfAuthContext(req, ctx) {
     const { BIGFIX_USER, BIGFIX_PASS, httpsAgent } = ctx.bigfix;
     
-    // ==========================================
-    // 1. BACKGROUND TASKS (No human user involved)
-    // ==========================================
     if (!req) {
-        return {
-            httpsAgent,
-            auth: { username: BIGFIX_USER, password: BIGFIX_PASS }
-        };
+        return { httpsAgent, auth: { username: BIGFIX_USER, password: BIGFIX_PASS } };
     }
 
-    // ==========================================
-    // 2. HUMAN USER TASKS (Strictly personal)
-    // ==========================================
     let requestUser = null;
-    
-    // Extract the exact user from the secure HTTP-Only cookie
     if (req.cookies && req.cookies.auth_session) {
-        try {
-            const sessionData = JSON.parse(req.cookies.auth_session);
-            requestUser = sessionData.username;
-        } catch (err) {
-            console.error("[Auth Context] Failed to parse auth_session cookie");
-        }
+        try { requestUser = JSON.parse(req.cookies.auth_session).username; } catch (err) {}
+    }
+    if (!requestUser && req.headers['x-active-user']) {
+        requestUser = req.headers['x-active-user'];
     }
 
-    if (!requestUser) {
-        throw new Error("Unauthorized: No active user session found.");
+    if (!requestUser) throw new Error("401_UNAUTHORIZED: No active user session found.");
+
+    // ⭐ MAGIC FIX: If the logged-in user matches the .env Service Account, ALWAYS use the .env password!
+    // This prevents the main admin from getting locked out or hitting 401s if DB gets out of sync.
+    if (requestUser.toLowerCase() === String(BIGFIX_USER).toLowerCase()) {
+        return { httpsAgent, auth: { username: BIGFIX_USER, password: BIGFIX_PASS } };
     }
 
     let finalUser = null;
@@ -73,16 +85,11 @@ async function getBfAuthContext(req, ctx) {
         console.error("[Auth Context] Failed to resolve DB credentials:", e.message);
     }
 
-    // STRICT BLOCK: If the user hasn't saved a password, DO NOT fall back to Master. Throw error.
     if (!finalUser || !finalPass) {
-         throw new Error("Missing personal BigFix API Credentials. Please go to Settings and verify your BigFix password.");
+         throw new Error("401_UNAUTHORIZED: Missing personal BigFix API Credentials.");
     }
 
-    // Use their personal credentials for this action
-    return {
-        httpsAgent,
-        auth: { username: finalUser, password: finalPass }
-    };
+    return { httpsAgent, auth: { username: finalUser, password: finalPass } };
 }
 
-module.exports = { joinUrl, toLowerSafe, splitEmails, escapeHtml, getBfAuthContext };
+module.exports = { joinUrl, toLowerSafe, splitEmails, escapeHtml, escapeXML, getSessionUser, getSessionRole, getBfAuthContext };

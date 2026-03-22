@@ -1,23 +1,13 @@
-// bigfix-backend/src/routes/pilot.js
+// src/routes/pilot.js
 const https = require("https");
 const axios = require("axios");
-const { joinUrl, toLowerSafe } = require("../utils/http");
+const { joinUrl, toLowerSafe, escapeXML, getBfAuthContext } = require("../utils/http");
 const { collectStrings, extractActionIdFromXml } = require("../utils/query");
 const { actionStore, CONFIG } = require("../state/store");
 const { logFactory } = require("../utils/log");
 const { sendTriggerMail } = require("../mail/transport");
 const { sql, getPool } = require("../db/mssql"); 
 const { saveConfigToDB } = require("./config");
-
-function xmlEscape(str) {
-  if (str == null) return "";
-  return String(str)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&apos;");
-}
 
 function toCSV(serverList) {
   if (!serverList || serverList.length === 0) return null;
@@ -125,9 +115,10 @@ async function triggerBaselineAction(req, ctx, {
   const urlBaseline = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(qBaseline)}`;
   log(req, "Baseline lookup →", urlBaseline);
 
+  const bfAuthOpts = await getBfAuthContext(req, ctx);
+
   const baselineResp = await axios.get(urlBaseline, {
-    httpsAgent,
-    auth: { username: BIGFIX_USER, password: BIGFIX_PASS },
+    ...bfAuthOpts,
     headers: { Accept: "application/json" },
     responseType: "json",
     timeout: 60_000,
@@ -147,8 +138,7 @@ async function triggerBaselineAction(req, ctx, {
   log(req, "Group lookup →", urlGroup);
   
   const groupResp = await axios.get(urlGroup, {
-    httpsAgent,
-    auth: { username: BIGFIX_USER, password: BIGFIX_PASS },
+    ...bfAuthOpts,
     headers: { Accept: "application/json" },
     responseType: "json",
     timeout: 60_000,
@@ -187,8 +177,7 @@ async function triggerBaselineAction(req, ctx, {
       const qServers = `names of members of bes computer group whose (id of it = ${gId})`;
       const urlServers = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(qServers)}`;
       const serversResp = await axios.get(urlServers, {
-        httpsAgent,
-        auth: { username: BIGFIX_USER, password: BIGFIX_PASS },
+        ...bfAuthOpts,
         headers: { Accept: "application/json" }
       });
       if (serversResp.status === 200) {
@@ -215,13 +204,12 @@ async function triggerBaselineAction(req, ctx, {
   const stageName = environment || "Pilot";
   const actionTitle = `BPS_${baselineName}_${stageName}`;
   const xmlOffset = endOffset || "P2D";
-  const xml = `<?xml version="1.0" encoding="UTF-8"?><BES xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="BES.xsd"><SourcedFixletAction><SourceFixlet><Sitename>${xmlEscape(siteName)}</Sitename><FixletID>${xmlEscape(fixletId)}</FixletID><Action>Action1</Action></SourceFixlet><Target><CustomRelevance>${xmlEscape(customRelevance)}</CustomRelevance></Target><Settings><HasEndTime>true</HasEndTime><EndDateTimeLocalOffset>${xmlEscape(xmlOffset)}</EndDateTimeLocalOffset><UseUTCTime>true</UseUTCTime></Settings><Title>${xmlEscape(actionTitle)}</Title></SourcedFixletAction></BES>`;
+  const xml = `<?xml version="1.0" encoding="UTF-8"?><BES xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="BES.xsd"><SourcedFixletAction><SourceFixlet><Sitename>${escapeXML(siteName)}</Sitename><FixletID>${escapeXML(fixletId)}</FixletID><Action>Action1</Action></SourceFixlet><Target><CustomRelevance>${escapeXML(customRelevance)}</CustomRelevance></Target><Settings><HasEndTime>true</HasEndTime><EndDateTimeLocalOffset>${escapeXML(xmlOffset)}</EndDateTimeLocalOffset><UseUTCTime>true</UseUTCTime></Settings><Title>${escapeXML(actionTitle)}</Title></SourcedFixletAction></BES>`;
 
   const bfPostUrl = joinUrl(BIGFIX_BASE_URL, "/api/actions");
   log(req, `BF POST → ${bfPostUrl} body=${xml.length} chars`);
   const bfResp = await axios.post(bfPostUrl, xml, {
-    httpsAgent,
-    auth: { username: BIGFIX_USER, password: BIGFIX_PASS },
+    ...bfAuthOpts,
     headers: { "Content-Type": "text/xml" },
     timeout: 60_000,
     validateStatus: () => true,

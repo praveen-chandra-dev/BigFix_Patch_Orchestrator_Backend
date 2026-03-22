@@ -3,22 +3,9 @@ const express = require("express");
 const axios = require("axios");
 const { getCtx } = require("../env");
 const { getRoleAssets, isMasterOperator } = require("../services/bigfix");
+const { getSessionUser, getSessionRole } = require("../utils/http");
 
 const router = express.Router();
-
-function getSessionUser(req) {
-    if (req && req.cookies && req.cookies.auth_session) {
-        try { return JSON.parse(req.cookies.auth_session).username; } catch(e){}
-    }
-    return req.headers['x-active-user'] || "unknown";
-}
-
-function getSessionRole(req) {
-    if (req && req.cookies && req.cookies.auth_session) {
-        try { return JSON.parse(req.cookies.auth_session).role; } catch(e){}
-    }
-    return null;
-}
 
 router.get("/", async (req, res) => {
   try {
@@ -28,7 +15,6 @@ router.get("/", async (req, res) => {
     const bfPass = ctx.cfg?.BIGFIX_PASS;
     const httpsAgent = ctx.bigfix?.httpsAgent;
 
-    // Use Master credentials to fetch all sites with their internal & display names
     const masterAuth = { username: bfUser, password: bfPass };
 
     const relevance = `(it as string) of (if master site flag of it then "[Master] ||" & name of it & "||" & (if exists display name of it then display name of it as string else name of it as string) else if custom site flag of it then "[Custom] ||" & name of it & "||" & (if exists display name of it then display name of it as string else name of it as string) else "[External] ||" & name of it & "||" & (if exists display name of it then display name of it as string else name of it as string)) of all bes sites`;
@@ -55,9 +41,6 @@ router.get("/", async (req, res) => {
       return { type, name: internalName, displayName };
     });
 
-    /* =========================
-       RBAC LOGIC
-    ========================= */
     const activeUser = getSessionUser(req);
     const activeRole = req.headers['x-user-role'] || getSessionRole(req);
     const isMO = await isMasterOperator(req, ctx, activeUser);

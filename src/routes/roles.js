@@ -3,7 +3,7 @@ const express = require('express');
 const axios = require('axios');
 const router = express.Router();
 const { sql, getPool } = require('../db/mssql');
-const { getBfAuthContext, joinUrl } = require('../utils/http');
+const { getBfAuthContext, joinUrl, escapeXML } = require('../utils/http');
 
 router.use(express.json());
 
@@ -11,8 +11,6 @@ function isAdmin(req) {
   if (!req.cookies?.auth_session) return false;
   try { return JSON.parse(req.cookies.auth_session).role === 'Admin'; } catch { return false; }
 }
-
-const xmlEscape = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
 const propToRelevanceMap = {
     "bes relay selection method": 'relay selection method of client',
@@ -30,7 +28,6 @@ const propToRelevanceMap = {
     "active directory path": 'active directory path of client'
 };
 
-// 1. Fetch ALL Roles natively from BigFix and merge with local DB
 router.get('/api/roles', async (req, res) => {
     if (!isAdmin(req)) return res.status(403).json({ ok: false, error: 'Forbidden' });
     try {
@@ -255,11 +252,11 @@ function buildRoleXml(data) {
     if (data.computers && data.computers.length > 0) {
         const conds = data.computers.map(c => {
             if (c.property === 'Group') {
-                return `\n<ComputerGroup>\n<Name>${xmlEscape(c.value)}</Name>\n</ComputerGroup>`;
+                return `\n<ComputerGroup>\n<Name>${escapeXML(c.value)}</Name>\n</ComputerGroup>`;
             } else {
                 const relExpr = propToRelevanceMap[String(c.property).toLowerCase()];
-                const relTag = relExpr ? `\n<Relevance>exists ((${relExpr}) as string) whose (it = "${xmlEscape(c.value)}")</Relevance>` : "";
-                return `\n<ByRetrievedProperties Match="All">\n<Property Name="${xmlEscape(c.property)}" Resource="${xmlEscape(c.resource || "")}">\n<Value>${encodeURIComponent(c.value).replace(/\(/g, '%28').replace(/\)/g, '%29')}</Value>\n</Property>${relTag}\n</ByRetrievedProperties>`;
+                const relTag = relExpr ? `\n<Relevance>exists ((${relExpr}) as string) whose (it = "${escapeXML(c.value)}")</Relevance>` : "";
+                return `\n<ByRetrievedProperties Match="All">\n<Property Name="${escapeXML(c.property)}" Resource="${escapeXML(c.resource || "")}">\n<Value>${encodeURIComponent(c.value).replace(/\(/g, '%28').replace(/\)/g, '%29')}</Value>\n</Property>${relTag}\n</ByRetrievedProperties>`;
             }
         }).join("");
         compXml = `\n<ComputerAssignments>${conds}\n</ComputerAssignments>`;
@@ -270,22 +267,22 @@ function buildRoleXml(data) {
         const siteElements = data.sites.map(s => {
             const tag = s.type === 'Custom' ? 'CustomSite' : 'ExternalSite';
             const perm = s.type === 'External' ? 'Reader' : (s.permission || 'Reader'); 
-            return `<${tag}>\n<Name>${xmlEscape(s.name)}</Name>\n<Permission>${xmlEscape(perm)}</Permission>\n</${tag}>`;
+            return `<${tag}>\n<Name>${escapeXML(s.name)}</Name>\n<Permission>${escapeXML(perm)}</Permission>\n</${tag}>`;
         }).join("");
         siteXml = `\n<Sites>\n${siteElements}\n</Sites>`;
     }
 
     let opXml = "";
     if (data.operators && data.operators.length > 0) {
-        const opElements = data.operators.map(op => `<Explicit>${xmlEscape(op)}</Explicit>`).join("\n");
+        const opElements = data.operators.map(op => `<Explicit>${escapeXML(op)}</Explicit>`).join("\n");
         opXml = `\n<Operators>\n${opElements}\n</Operators>`;
     }
 
     return `<?xml version="1.0" encoding="UTF-8"?>
     <BESAPI xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="BESAPI.xsd">
         <Role>
-            <Name>${xmlEscape(data.name)}</Name>
-            <Description>${xmlEscape(data.description)}</Description>
+            <Name>${escapeXML(data.name)}</Name>
+            <Description>${escapeXML(data.description)}</Description>
             <MasterOperator>${data.perms.masterOperator || '0'}</MasterOperator>
             <CustomContent>${data.perms.customContent || '0'}</CustomContent>
             <ShowOtherActions>${data.perms.showOtherActions || '0'}</ShowOtherActions>

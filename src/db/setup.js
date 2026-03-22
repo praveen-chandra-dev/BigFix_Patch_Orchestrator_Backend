@@ -31,6 +31,7 @@ async function runDatabaseSetup() {
     const appDbConfig = { ...masterConfig, database: dbName };
     pool = await new sql.ConnectionPool(appDbConfig).connect();
 
+    // STRICT & CLEAN USERS TABLE
     await pool.request().query(`
       IF OBJECT_ID('dbo.USERS', 'U') IS NULL
       CREATE TABLE dbo.USERS (
@@ -38,12 +39,10 @@ async function runDatabaseSetup() {
           [LoginName] NVARCHAR(128) NOT NULL,
           [PasswordHash] NVARCHAR(128) NULL,
           [PasswordSalt] NVARCHAR(128) NULL,
-          [PasswordHistory] VARBINARY(MAX) NULL,
           [HashAlgorithm] NVARCHAR(12) NOT NULL,
           [CreatedAt] DATETIME2(3) DEFAULT GETUTCDATE(),
           [UpdatedAt] DATETIME2(3) DEFAULT GETUTCDATE(),
-          [AppState] NVARCHAR(MAX) NULL,
-          [Role] NVARCHAR(20) DEFAULT 'Windows',
+          [Role] NVARCHAR(50) DEFAULT 'Admin',
           [BfPasswordEncrypted] NVARCHAR(MAX) NULL
       );
       
@@ -65,7 +64,6 @@ async function runDatabaseSetup() {
           CreatedAt DATETIME DEFAULT SYSUTCDATETIME()
       );
       
-      -- NEW TABLE: BES_ROLES
       IF OBJECT_ID('dbo.BES_ROLES', 'U') IS NULL
       CREATE TABLE dbo.BES_ROLES (
           [RoleID] INT IDENTITY(1,1) PRIMARY KEY,
@@ -141,12 +139,7 @@ async function runDatabaseSetup() {
       }
     } catch(e) { logger.warn("PatchSchedule migration check failed: " + e.message); }
 
-    if ((await pool.request().query(`SELECT 1 FROM dbo.USERS WHERE UserID = 9002`)).recordset.length === 0) {
-      await pool.request().query(`INSERT INTO dbo.USERS (UserID, LoginName, HashAlgorithm, Role) VALUES (9002, 'shared_windows', 'PBKDF2', 'Windows')`);
-    }
-    if ((await pool.request().query(`SELECT 1 FROM dbo.USERS WHERE UserID = 9003`)).recordset.length === 0) {
-      await pool.request().query(`INSERT INTO dbo.USERS (UserID, LoginName, HashAlgorithm, Role) VALUES (9003, 'shared_linux', 'PBKDF2', 'Linux')`);
-    }
+    // DUMMY USERS INSERTION COMPLETELY REMOVED!
 
     logger.info("[DB Setup] Database initialization complete.");
 

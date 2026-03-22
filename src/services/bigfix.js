@@ -3,16 +3,20 @@ const axios = require("axios");
 const { collectStrings } = require("../utils/query");
 const { getBfAuthContext, joinUrl } = require("../utils/http");
 
-// High-speed memory cache to prevent slow API calls on every request
 const moCache = {}; 
+const roleAssetsCache = new Map(); 
+const ASSET_CACHE_TTL = 15 * 60 * 1000; 
 
-// --- HELPER: Parse BigFix Role XML for assigned Sites and Computers ---
 async function getRoleAssets(req, ctx, roleName) {
+    const cacheKey = roleName;
+    const now = Date.now();
+    if (roleAssetsCache.has(cacheKey) && (now - roleAssetsCache.get(cacheKey).lastFetch < ASSET_CACHE_TTL)) {
+        return roleAssetsCache.get(cacheKey).data;
+    }
+
     const { BIGFIX_BASE_URL, BIGFIX_USER, BIGFIX_PASS, httpsAgent } = ctx.bigfix;
     try {
         const auth = { username: BIGFIX_USER, password: BIGFIX_PASS };
-        
-        // 1. BigFix API requires the Role ID. Fetch all roles to map the exact Name to its ID.
         const rolesUrl = joinUrl(BIGFIX_BASE_URL, `/api/roles`);
         const rolesResp = await axios.get(rolesUrl, { httpsAgent, auth, headers: { Accept: "application/xml" }, validateStatus: () => true });
         
@@ -30,56 +34,48 @@ async function getRoleAssets(req, ctx, roleName) {
 
         if (!roleId) return { compNames: [], customSites: [], externalSites: [], found: false };
 
-        // 2. Fetch the specific Role XML using the resolved ID
         const url = joinUrl(BIGFIX_BASE_URL, `/api/role/${roleId}`);
         const resp = await axios.get(url, { httpsAgent, auth, headers: { Accept: "application/xml" }, validateStatus: () => true });
 
-        let compNames = [];
-        let customSites = [];
-        let externalSites = [];
+        let compNames = [], customSites = [], externalSites = [];
 
         if (resp.status === 200) {
             const xml = String(resp.data || "");
 
-            // STRICT PARSING: Accurately isolate Custom vs External Sites
             const sitesBlockMatch = xml.match(/<Sites>([\s\S]*?)<\/Sites>/i);
             if (sitesBlockMatch) {
                 const sitesXml = sitesBlockMatch[1];
-                
                 const customRegex = /<CustomSite>[\s\S]*?<Name>(.*?)<\/Name>[\s\S]*?<\/CustomSite>/gi;
-                let customMatch;
-                while ((customMatch = customRegex.exec(sitesXml)) !== null) {
-                    customSites.push(customMatch[1].trim());
-                }
+                let customMatch; while ((customMatch = customRegex.exec(sitesXml)) !== null) customSites.push(customMatch[1].trim());
 
                 const externalRegex = /<ExternalSite>[\s\S]*?<Name>(.*?)<\/Name>[\s\S]*?<\/ExternalSite>/gi;
-                let externalMatch;
-                while ((externalMatch = externalRegex.exec(sitesXml)) !== null) {
-                    externalSites.push(externalMatch[1].trim());
-                }
+                let externalMatch; while ((externalMatch = externalRegex.exec(sitesXml)) !== null) externalSites.push(externalMatch[1].trim());
             }
 
-            // STRICT PARSING: Assigned Computers
             const compsBlockMatch = xml.match(/<ComputerAssignments>([\s\S]*?)<\/ComputerAssignments>/i);
             if (compsBlockMatch) {
                 const compsXml = compsBlockMatch[1];
                 const valRegex = /<Value>(.*?)<\/Value>/gi;
-                let valMatch;
-                while ((valMatch = valRegex.exec(compsXml)) !== null) {
-                    compNames.push(valMatch[1].trim().toLowerCase());
-                }
+                let valMatch; while ((valMatch = valRegex.exec(compsXml)) !== null) compNames.push(valMatch[1].trim().toLowerCase());
             }
         }
-        return { compNames, customSites, externalSites, found: resp.status === 200 };
+
+        const data = { compNames, customSites, externalSites, found: resp.status === 200 };
+        roleAssetsCache.set(cacheKey, { data, lastFetch: now });
+        return data;
+
     } catch (e) { return { compNames: [], customSites: [], externalSites: [], found: false }; }
 }
 
 async function isMasterOperator(req, ctx, operatorName) {
     if (moCache[operatorName] !== undefined) return moCache[operatorName];
+    if (!operatorName || operatorName === "unknown") return false;
 
     try {
         const { BIGFIX_BASE_URL } = ctx.bigfix;
-        const bfAuthOpts = await getBfAuthContext(req, ctx);
+        
+        // 🚀 CRITICAL FIX: ALWAYS USE MASTER CREDS to verify MO status. Avoids NMO 401 crash.
+        const bfAuthOpts = await getBfAuthContext(null, ctx); 
         
         const url = joinUrl(BIGFIX_BASE_URL, `/api/operator/${encodeURIComponent(operatorName)}`);
         const resp = await axios.get(url, { ...bfAuthOpts, headers: { Accept: "application/xml" }, validateStatus: () => true });
@@ -93,19 +89,12 @@ async function isMasterOperator(req, ctx, operatorName) {
                 return isMO;
             }
         }
-        
-        // Fallback
-        const relUrl = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent("master flag of current console user")}`;
-        const relResp = await axios.get(relUrl, { ...bfAuthOpts, headers: { Accept: "application/json" }, validateStatus: () => true });
-        if (relResp.status === 200 && relResp.data?.result) {
-            const resStr = String(relResp.data.result[0] || relResp.data.result).trim().toLowerCase();
-            const isMO = resStr === "true";
-            moCache[operatorName] = isMO;
-            return isMO;
-        }
         moCache[operatorName] = false;
         return false;
-    } catch (e) { return false; }
+    } catch (e) {
+        moCache[operatorName] = false;
+        return false;
+    }
 }
 
 const bigfixClient = (req, ctx) => { 
@@ -116,7 +105,8 @@ const bigfixClient = (req, ctx) => {
   async function getGroupMembers(groupName) {
     const relevance = `((name of it | "N/A"), (if (exists values of results (it, bes properties "IP Address")) then (concatenation ", " of values of results (it, bes properties "IP Address")) else "N/A"), (operating system of it | "Unknown")) of members  whose (value of result (it, bes property "Device Type") as lowercase = "server") of bes computer group whose (name of it = "${groupName}")`;
     try {
-      const bfAuthOpts = await getBfAuthContext(req, ctx); 
+      // 🚀 CRITICAL FIX: Use Master Creds for fetching base data, RBAC filters it via Node cache later.
+      const bfAuthOpts = await getBfAuthContext(null, ctx); 
       const res = await axios.get(`${BIGFIX_BASE_URL}/api/query`, { ...bfAuthOpts, params: { output: "json", relevance } });
       const result = res.data?.result;
       const rows = Array.isArray(result) ? result : (result ? [result] : []);
@@ -125,7 +115,9 @@ const bigfixClient = (req, ctx) => {
         const parts = []; collectStrings(r, parts); const [name, ipStr, os] = parts;
         return { name: name || "Unknown", ips: (ipStr || "").split(";").filter(Boolean), os: os || "Unknown" };
       });
-    } catch (err) { throw new Error(`Failed to fetch members`); }
+    } catch (err) { 
+      throw new Error(`Failed to fetch members: ${err.message}`); 
+    }
   }
   return { getGroupMembers };
 };

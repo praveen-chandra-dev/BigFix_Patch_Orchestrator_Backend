@@ -1,12 +1,11 @@
 // src/routes/actions.js
 const axios = require("axios");
-const { joinUrl, toLowerSafe } = require("../utils/http");
+const { joinUrl, toLowerSafe, escapeXML, getBfAuthContext } = require("../utils/http");
 const { collectStrings, extractActionIdFromXml } = require("../utils/query");
 const { actionStore, CONFIG } = require("../state/store");
 const { logFactory } = require("../utils/log");
 const { sendTriggerMail } = require("../mail/transport");
 const { sql, getPool } = require("../db/mssql"); 
-const { getBfAuthContext } = require("../utils/http");
 const { saveConfigToDB } = require("./config");
 
 function toCSV(serverList) {
@@ -20,8 +19,6 @@ function attachActionsRoutes(app, ctx) {
   const log = logFactory(ctx.DEBUG_LOG);
   const { BIGFIX_BASE_URL } = ctx.bigfix;
   const { SMTP_FROM, SMTP_TO, SMTP_CC, SMTP_BCC } = ctx.smtp;
-
-  const xmlEscape = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
 
   function getPatchWindowMs(patchWindow) {
     if (patchWindow && typeof patchWindow === "object") {
@@ -74,7 +71,7 @@ function attachActionsRoutes(app, ctx) {
       const relevance = `(id of it) of bes computers whose (name of it as lowercase is contained by set of (${safeNames}))`;
       const url = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(relevance)}`;
       
-      const bfAuthOpts = await getBfAuthContext(req, ctx); // SECURE CONTEXT
+      const bfAuthOpts = await getBfAuthContext(req, ctx); 
       const resp = await axios.get(url, { ...bfAuthOpts, headers: { Accept: "application/json" } });
 
       if (resp.status < 200 || resp.status >= 300) throw new Error(`BigFix query failed: HTTP ${resp.status}`);
@@ -82,11 +79,11 @@ function attachActionsRoutes(app, ctx) {
       if (ids.length === 0) return res.status(404).json({ ok: false, error: "No valid Computer IDs found." });
 
       const targetXml = ids.map(id => `<ComputerID>${id}</ComputerID>`).join("");
-      const xml = `<?xml version="1.0" encoding="utf-8"?><BES xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" SkipUI="true"><SingleAction><Title>${xmlEscape(`BPS_Restart_Bulk_${ids.length}_Computers`)}</Title><Relevance>true</Relevance><ActionScript>restart 60</ActionScript><SuccessCriteria Option="RunToCompletion"></SuccessCriteria><Settings /><SettingsLocks /><Target>${targetXml}</Target></SingleAction></BES>`;
+      const xml = `<?xml version="1.0" encoding="utf-8"?><BES xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" SkipUI="true"><SingleAction><Title>${escapeXML(`BPS_Restart_Bulk_${ids.length}_Computers`)}</Title><Relevance>true</Relevance><ActionScript>restart 60</ActionScript><SuccessCriteria Option="RunToCompletion"></SuccessCriteria><Settings /><SettingsLocks /><Target>${targetXml}</Target></SingleAction></BES>`;
 
       const bfPostUrl = joinUrl(BIGFIX_BASE_URL, "/api/actions");
       const bfResp = await axios.post(bfPostUrl, xml, {
-        ...bfAuthOpts, // SECURE CONTEXT FOR POST
+        ...bfAuthOpts, 
         headers: { "Content-Type": "text/xml" },
         timeout: 60_000,
         validateStatus: () => true,
@@ -108,18 +105,18 @@ function attachActionsRoutes(app, ctx) {
       const relevance = `(ids of it) of bes computers whose (name of it as lowercase = "${safeComputerName}")`;
       const url = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(relevance)}`;
       
-      const bfAuthOpts = await getBfAuthContext(req, ctx); // SECURE CONTEXT
+      const bfAuthOpts = await getBfAuthContext(req, ctx); 
       const resp = await axios.get(url, { ...bfAuthOpts, headers: { Accept: "application/json" } });
       
       const parts = []; collectStrings(resp.data?.result, parts); 
       if (parts.length === 0 || !/^\d+$/.test(parts[0])) return res.status(404).json({ ok: false, error: "Computer not found." });
       
       const computerId = parts[0];
-      const xml = `<?xml version="1.0" encoding="utf-8"?><BES xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" SkipUI="true"><SingleAction><Title>BPS_Window_Update_Service_Restart-${xmlEscape(computerName)}</Title><Relevance>true</Relevance><ActionScript>waithidden cmd.exe /c sc config wuauserv start= autowaithidden cmd.exe /c sc start wuauserv</ActionScript><SuccessCriteria Option="RunToCompletion"></SuccessCriteria><Settings /><SettingsLocks /><Target><ComputerID>${computerId}</ComputerID></Target></SingleAction></BES>`;
+      const xml = `<?xml version="1.0" encoding="utf-8"?><BES xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" SkipUI="true"><SingleAction><Title>BPS_Window_Update_Service_Restart-${escapeXML(computerName)}</Title><Relevance>true</Relevance><ActionScript>waithidden cmd.exe /c sc config wuauserv start= autowaithidden cmd.exe /c sc start wuauserv</ActionScript><SuccessCriteria Option="RunToCompletion"></SuccessCriteria><Settings /><SettingsLocks /><Target><ComputerID>${computerId}</ComputerID></Target></SingleAction></BES>`;
       
       const bfPostUrl = joinUrl(BIGFIX_BASE_URL, "/api/actions");
       const bfResp = await axios.post(bfPostUrl, xml, {
-        ...bfAuthOpts, // SECURE CONTEXT FOR POST
+        ...bfAuthOpts, 
         headers: { "Content-Type": "text/xml" },
         timeout: 60_000,
         validateStatus: () => true,
@@ -139,7 +136,7 @@ function attachActionsRoutes(app, ctx) {
     try {
       if (!baselineName || !groupName) return res.status(400).json({ ok: false, error: "baselineName and groupName are required" });
 
-      const bfAuthOpts = await getBfAuthContext(req, ctx); // SECURE CONTEXT FOR ALL ACTION OPS
+      const bfAuthOpts = await getBfAuthContext(req, ctx); 
 
       // 1) Baseline lookup
       const qBaseline = `(name of site of it, id of it) of bes baseline whose (name of it is "${baselineName.replace(/"/g, '\\"')}")`;
@@ -196,7 +193,7 @@ function attachActionsRoutes(app, ctx) {
       // 5) Build & POST Action XML
       const envLabel = (forcedEnvironment || environment || "Sandbox").toString().trim();
       const actionTitle = `BPS_${baselineName}_${envLabel}`;
-      const xml = `<?xml version="1.0" encoding="UTF-8"?><BES xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="BES.xsd"><SourcedFixletAction><SourceFixlet><Sitename>${xmlEscape(siteName)}</Sitename><FixletID>${xmlEscape(fixletId)}</FixletID><Action>Action1</Action></SourceFixlet><Target><CustomRelevance>${xmlEscape(customRelevance)}</CustomRelevance></Target><Settings><HasEndTime>true</HasEndTime><EndDateTimeLocalOffset>${xmlEscape(endDateTimeLocalOffsetVal)}</EndDateTimeLocalOffset><UseUTCTime>true</UseUTCTime></Settings><Title>${xmlEscape(actionTitle)}</Title></SourcedFixletAction></BES>`;
+      const xml = `<?xml version="1.0" encoding="UTF-8"?><BES xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="BES.xsd"><SourcedFixletAction><SourceFixlet><Sitename>${escapeXML(siteName)}</Sitename><FixletID>${escapeXML(fixletId)}</FixletID><Action>Action1</Action></SourceFixlet><Target><CustomRelevance>${escapeXML(customRelevance)}</CustomRelevance></Target><Settings><HasEndTime>true</HasEndTime><EndDateTimeLocalOffset>${escapeXML(endDateTimeLocalOffsetVal)}</EndDateTimeLocalOffset><UseUTCTime>true</UseUTCTime></Settings><Title>${escapeXML(actionTitle)}</Title></SourcedFixletAction></BES>`;
 
       const bfPostUrl = joinUrl(BIGFIX_BASE_URL, "/api/actions");
       const bfResp = await axios.post(bfPostUrl, xml, { ...bfAuthOpts, headers: { "Content-Type": "text/xml" }, validateStatus: () => true, responseType: "text" });
@@ -211,7 +208,6 @@ function attachActionsRoutes(app, ctx) {
         actionStore.lastActionId = actionId; 
         actionStore.actions[actionId] = metadata;
 
-        // Persist to GlobalConfig so it carries over to Pilot for ALL users
         if (envLabel.toLowerCase() === "sandbox") {
             CONFIG.lastSandboxBaseline = baselineName;
             CONFIG.lastSandboxGroup = gName;

@@ -9,6 +9,7 @@ const { authenticateLDAP } = require('../services/ldap');
 const { encrypt, decrypt } = require('../utils/crypto'); 
 const { getCtx } = require('../env');
 const { joinUrl } = require('../utils/http');
+const { logger } = require('../services/logger'); // NEW IMPORT FOR LOGGING
 
 const HASH_ALGORITHM = 'PBKDF2';
 
@@ -27,16 +28,12 @@ function isAdmin(req) {
   } catch { return false; }
 }
 
-// --- STRICT UPN VALIDATOR ---
-// Requires at least one character, an '@' symbol, at least one character for the domain, a dot, and at least 2 characters for the TLD.
 function isValidLDAPUser(username) {
     if (!username) return false;
-    // e.g. user@domain.com
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
     return emailRegex.test(username);
 }
 
-// --- HELPER: JIT PROVISIONING ---
 async function createBigFixOperator(username, isLdap, plainPassword = null, ldapDN = null, isMaster = false) {
     const ctx = getCtx();
     const { BIGFIX_BASE_URL, BIGFIX_USER, BIGFIX_PASS, httpsAgent } = ctx.bigfix;
@@ -48,7 +45,7 @@ async function createBigFixOperator(username, isLdap, plainPassword = null, ldap
         xml = `<?xml version="1.0" encoding="UTF-8"?><BESAPI xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="BESAPI.xsd"><Operator><Name>${username}</Name><Password>${plainPassword}</Password><MasterOperator>${isMaster ? 'true' : 'false'}</MasterOperator></Operator></BESAPI>`;
     } else {
         if (!ldapDN) {
-            console.warn(`[RBAC] LDAP DN missing for ${username}. Cannot create BigFix operator.`);
+            logger.warn(`[RBAC] LDAP DN missing for ${username}. Cannot create BigFix operator.`);
             return false;
         }
 
@@ -59,7 +56,7 @@ async function createBigFixOperator(username, isLdap, plainPassword = null, ldap
                 httpsAgent, auth: { username: BIGFIX_USER, password: BIGFIX_PASS }, headers: { Accept: "application/xml" }
             });
         } catch (e) {
-            console.warn(`[RBAC] Failed to query BigFix LDAP Directories. Ensure AD is integrated in BigFix.`);
+            logger.warn(`[RBAC] Failed to query BigFix LDAP Directories. Ensure AD is integrated in BigFix.`);
             return false; 
         }
         
@@ -71,7 +68,7 @@ async function createBigFixOperator(username, isLdap, plainPassword = null, ldap
         }
 
         if (!serverId) {
-            console.warn(`[RBAC] Could not locate LDAP Server ID in BigFix. Cannot create LDAP user.`);
+            logger.warn(`[RBAC] Could not locate LDAP Server ID in BigFix. Cannot create LDAP user.`);
             return false;
         }
         
@@ -86,12 +83,11 @@ async function createBigFixOperator(username, isLdap, plainPassword = null, ldap
     } catch (e) {
         const errBody = e.response?.data ? String(e.response.data) : e.message;
         if (errBody.includes("already exists") || errBody.includes("unique constraint")) return true; 
-        console.warn(`[RBAC] BigFix rejected operator creation: ${errBody.substring(0, 150)}`);
+        logger.warn(`[RBAC] BigFix rejected operator creation: ${errBody.substring(0, 150)}`);
         return false;
     }
 }
 
-// --- HELPER: ASSIGN USER TO BIGFIX ROLE VIA PUT REQUEST ---
 async function assignUserToRole(username, roleName) {
     if (!roleName || roleName === 'Admin') return true; 
 
@@ -139,26 +135,35 @@ async function assignUserToRole(username, roleName) {
         }
     } catch (err) {
         if (err.response && err.response.status === 400) return false; 
-        console.warn(`[RBAC] Failed to assign user to role in BigFix:`, err.message);
+        logger.warn(`[RBAC] Failed to assign user to role in BigFix: ${err.message}`);
         return false;
     }
     return false;
 }
 
-// --- HELPER: LIVE CREDENTIAL VERIFICATION ---
+// --- HELPER: LIVE CREDENTIAL VERIFICATION WITH DEEP LOGGING ---
 async function verifyBigFixCredentials(username, password) {
     const ctx = getCtx();
     const { BIGFIX_BASE_URL, httpsAgent } = ctx.bigfix;
     try {
+        logger.info(`[BigFix Auth] Verifying BigFix credentials for operator: '${username}'...`);
         const url = joinUrl(BIGFIX_BASE_URL, '/api/login');
-        await axios.get(url, { httpsAgent, auth: { username, password } });
+        const resp = await axios.get(url, { httpsAgent, auth: { username, password } });
+        
+        logger.info(`[BigFix Auth] SUCCESS! Credentials accepted for '${username}'.`);
         return true; 
-    } catch (e) { return false; }
+    } catch (e) { 
+        const status = e.response ? e.response.status : 'Network Error';
+        logger.error(`[BigFix Auth] FAILED for operator '${username}'. API returned Status: ${status}`);
+        
+        if (e.response && e.response.data) {
+            logger.error(`[BigFix Auth] Raw Error Response from BigFix: ${String(e.response.data).replace(/\n/g, '')}`);
+        } else {
+            logger.error(`[BigFix Auth] Network Error Message: ${e.message}`);
+        }
+        return false; 
+    }
 }
-
-// =========================================================================
-// --- DYNAMIC BIGFIX ROLE EXPOSURE AND DB STATE SYNC ---
-// =========================================================================
 
 router.get('/api/auth/all-roles', async (req, res) => {
     try {
@@ -324,7 +329,9 @@ router.post('/api/auth/my-bigfix-creds', async (req, res) => {
 
     try {
         const isValid = await verifyBigFixCredentials(username, bfPassword);
-        if (!isValid) return res.status(401).json({ ok: false, error: 'Invalid password, or Operator does not exist in BigFix.' });
+        if (!isValid) {
+            return res.status(401).json({ ok: false, error: 'BigFix API rejected the credentials. Check backend terminal logs for exact reason.' });
+        }
 
         const pool = await getPool();
         const encryptedPass = encrypt(bfPassword); 
@@ -411,7 +418,6 @@ router.post('/api/auth/login', async (req, res) => {
              try { if (verifyPassword(password, userRecord.PasswordSalt, userRecord.PasswordHash)) authenticated = true; } catch (err) {}
         }
         
-        // Native BigFix Fallback: Allows Native Operators to log in even if LDAP fails
         if (!authenticated && userRecord) {
             const isBigFixAuthOk = await verifyBigFixCredentials(username, password);
             if (isBigFixAuthOk) {
@@ -426,7 +432,6 @@ router.post('/api/auth/login', async (req, res) => {
 
     if (!authenticated) return res.status(401).json({ ok:false, error:'invalid', message: 'Invalid username or password.' });
 
-    // JIT: Ensure Operator is provisioned inside BigFix AND their AD password is saved securely to the Vault
     if (isLdapOk && !userRecord.BfPasswordEncrypted && ldapResult.dn) {
         try { await createBigFixOperator(username, true, null, ldapResult.dn, userRecord.Role === 'Admin'); } catch (e) { }
         const encPass = encrypt(password);
@@ -437,7 +442,6 @@ router.post('/api/auth/login', async (req, res) => {
         if (encPass) await pool.request().input('Bf', sql.NVarChar(sql.MAX), encPass).input('UID', sql.Int, userRecord.UserID).query('UPDATE dbo.USERS SET BfPasswordEncrypted = @Bf WHERE UserID = @UID');
     }
 
-    // JIT: Automatically assign the BigFix Role silently in the background upon login
     if (userRecord && userRecord.Role && userRecord.Role !== 'Admin') {
         await assignUserToRole(username, userRecord.Role);
     }
@@ -455,7 +459,6 @@ router.post('/api/auth/admin/add-user', async (req, res) => {
         const { username, role, password } = req.body;
         if (!username || !role) return res.status(400).json({ ok: false, error: 'bad_request' });
 
-        // FIX: Replaced simple @ check with strict UPN Validation to prevent malformed email crashes
         const isLdap = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(username);
         
         if (!isLdap && !password) return res.status(400).json({ ok: false, error: 'Password required for local users. If LDAP, ensure full format: user@domain.com' });
@@ -473,19 +476,17 @@ router.post('/api/auth/admin/add-user', async (req, res) => {
 
         const isMaster = role === 'Admin';
 
-        // 1. If Local user, aggressively create in BigFix now. If LDAP, skip it entirely and wait for JIT login.
         if (!isLdap) {
             try {
                 await createBigFixOperator(username, false, password, null, isMaster);
                 if (!isMaster) await assignUserToRole(username, role);
             } catch (bfErr) {
-                console.warn(`[RBAC] Local BigFix operator creation threw an error: ${bfErr.message}`);
+                logger.warn(`[RBAC] Local BigFix operator creation threw an error: ${bfErr.message}`);
             }
         } else {
-            console.log(`[RBAC] LDAP User '${username}' detected. Bypassing proactive BigFix creation. Will JIT provision upon their first login.`);
+            logger.info(`[RBAC] LDAP User '${username}' detected. Bypassing proactive BigFix creation. Will JIT provision upon their first login.`);
         }
 
-        // 2. Save to Patch Setu DB
         let finalHash = 'LDAP_AUTH';
         let finalSalt = 'LDAP_AUTH';
         let finalAlgo = 'NONE';
