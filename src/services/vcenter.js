@@ -1,9 +1,7 @@
-// bigfix-backend/src/services/vcenter.js
+// src/services/vcenter.js
 const axios = require("axios");
 const https = require("https");
 
-// --- BACKEND IN-MEMORY CACHE ---
-// Remembers IP to VM ID mappings. Drastically speeds up lookups across the whole app.
 const resolveCache = new Map(); 
 
 const vcenterClient = (ctx) => {
@@ -279,38 +277,43 @@ const vcenterClient = (ctx) => {
     return statuses;
   };
 
+  // 🚀 HIGH-SPEED PARALLEL RESOLUTION
   async function resolveTargets(targetList) {
     if (!targetList || !targetList.length) return [];
     try {
       const { searchIndex } = await connectAndLogin();
-      const resolved = [];
-      for (const t of targetList) {
+      
+      const resolved = await Promise.all(targetList.map(async (t) => {
         let foundId = null;
         if (t.ips && Array.isArray(t.ips)) {
-          for (const rawIp of t.ips) {
+          // Parallel IP check
+          await Promise.all(t.ips.map(async (rawIp) => {
+            if (foundId) return; // short-circuit
             const ip = String(rawIp).trim();
-            if (!ip) continue;
+            if (!ip) return;
             
-            // IN-MEMORY CACHE CHECK
             if (resolveCache.has(ip)) {
                 foundId = resolveCache.get(ip);
-                break;
+                return;
             }
 
-            const soapBody = `<urn:FindByIp><urn:_this type="SearchIndex">${searchIndex}</urn:_this><urn:ip>${ip}</urn:ip><urn:vmSearch>true</urn:vmSearch></urn:FindByIp>`;
-            const r = await postSoap(soapBody);
-            if (r.error) continue;
-            const vmId = extractVal(r.data, "returnval");
-            if (vmId) { 
-                foundId = vmId; 
-                resolveCache.set(ip, vmId); // STORE IN MEMORY
-                break; 
-            }
-          }
+            try {
+               const soapBody = `<urn:FindByIp><urn:_this type="SearchIndex">${searchIndex}</urn:_this><urn:ip>${ip}</urn:ip><urn:vmSearch>true</urn:vmSearch></urn:FindByIp>`;
+               const r = await postSoap(soapBody);
+               if (!r.error) {
+                   const vmId = extractVal(r.data, "returnval");
+                   if (vmId) { 
+                       foundId = vmId; 
+                       resolveCache.set(ip, vmId); 
+                   }
+               }
+            } catch(e) {}
+          }));
         }
-        if (foundId) resolved.push({ ...t, id: foundId });
-      }
-      return resolved;
+        return foundId ? { ...t, id: foundId } : null;
+      }));
+
+      return resolved.filter(Boolean);
     } catch (e) { throw e; }
   }
 

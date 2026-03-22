@@ -101,7 +101,7 @@ function attachGroupRoutes(app, ctx) {
 
         const relevance = `(id of it as string & "||" & name of it) of bes computer groups${siteFilter}`;
         
-        // 🚀 CRITICAL FIX: Safe read using Master Creds since RBAC is handled above via siteFilter
+        // CRITICAL FIX: Safe read using Master Creds since RBAC is handled above via siteFilter
         const bfAuthOpts = await getBfAuthContext(null, ctx); 
         const url = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(relevance)}`;
         
@@ -130,7 +130,7 @@ function attachGroupRoutes(app, ctx) {
     log(req, `[Groups] Creating ${type} group: ${name}`);
 
     try {
-        const bfAuthOpts = await getBfAuthContext(req, ctx); // Action uses Real Creds
+        const bfAuthOpts = await getBfAuthContext(req, ctx); 
         const operatorName = bfAuthOpts.auth.username;
 
         let endpoint = "", xmlBody = "";
@@ -223,7 +223,7 @@ function attachGroupRoutes(app, ctx) {
     log(req, `[Groups] Deleting Group ID: ${id}`);
 
     try {
-        const bfAuthOpts = await getBfAuthContext(req, ctx); // Action uses real creds
+        const bfAuthOpts = await getBfAuthContext(req, ctx); 
         const bfUrl = bfAuthOpts.baseURL || (ctx.cfg?.BIGFIX_BASE_URL || "").replace(/\/$/, "");
 
         let endpoint;
@@ -344,7 +344,7 @@ function attachGroupRoutes(app, ctx) {
             return res.json({ ok: true, properties: propertiesCache.data });
         }
 
-        const bfAuthOpts = await getBfAuthContext(null, ctx); // 🚀 USE MASTER CREDS
+        const bfAuthOpts = await getBfAuthContext(null, ctx);
         const relevance = `(((item 1 of it) of id of it as string | "N/A") & "||" & (name of it as string | "N/A")) of bes properties whose (reserved flag of it is true)`;
         const url = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(relevance)}`;
         const resp = await axios.get(url, bfAuthOpts);
