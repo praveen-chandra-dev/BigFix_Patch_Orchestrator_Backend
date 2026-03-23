@@ -3,6 +3,7 @@ const fs = require("fs");
 const path = require("path");
 const https = require("https");
 const os = require("os");
+const crypto = require("crypto"); // 🚀 Added Crypto for auto-generation
 
 function projectRoot() { return process.cwd(); }
 function envPath() { return path.resolve(projectRoot(), ".env"); }
@@ -47,6 +48,7 @@ const UI_KEYS = new Set([
   "PILOT_BIGFIX_ALLOW_SELF_SIGNED", "PILOT_BIGFIX_BASE_URL", "PILOT_BIGFIX_USER", "PILOT_BIGFIX_PASS",
   "PRODUCTION_BIGFIX_ALLOW_SELF_SIGNED", "PRODUCTION_BIGFIX_BASE_URL", "PRODUCTION_BIGFIX_USER", "PRODUCTION_BIGFIX_PASS",
   "SN_ALLOW_SELF_SIGNED", "SN_URL", "SN_USER", "SN_PASSWORD",
+  "PRISM_BASE_URL", "PRISM_USER", "PRISM_PASS",
   "VCENTER_URL", "VCENTER_USER", "VCENTER_PASSWORD", "VCENTER_ALLOW_SELF_SIGNED",
   "SMTP_ALLOW_SELF_SIGNED", "SMTP_HOST", "SMTP_PORT", "SMTP_SECURE",
   "SMTP_FROM", "SMTP_TO", "SMTP_CC", "SMTP_BCC",
@@ -70,7 +72,7 @@ function writeEnvFull(fullDict) {
 const SECRET_KEYS = new Set([
   "BIGFIX_PASS", "SANDBOX_BIGFIX_PASS", "PILOT_BIGFIX_PASS", "PRODUCTION_BIGFIX_PASS",
   "SN_PASSWORD", "SMTP_PASSWORD", "VCENTER_PASSWORD", "PRISM_PASS",
-  "SQL_SERVER_AUTHENTICATION_PASSWORD" // <-- added back
+  "SQL_SERVER_AUTHENTICATION_PASSWORD"
 ]);
 
 function b64d(val) {
@@ -92,15 +94,29 @@ function loadFromFileDict() {
   return dict;
 }
 
+// 🚀 AUTO-GENERATE ENCRYPTION KEY IF MISSING
+function ensureEncryptionKey() {
+  const dict = loadFromFileDict();
+  if (!dict.ENCRYPTION_KEY) {
+    const newKey = crypto.randomBytes(32).toString('hex');
+    dict.ENCRYPTION_KEY = newKey;
+    writeEnvFull(dict); // Permanently save to .env
+    process.env.ENCRYPTION_KEY = newKey;
+    console.log("🔒 Auto-generated new ENCRYPTION_KEY and permanently saved to .env");
+  } else {
+    process.env.ENCRYPTION_KEY = dict.ENCRYPTION_KEY;
+  }
+}
+
+// Initialize the key before building config
+ensureEncryptionKey();
+
 function computeMissing(dict) {
   const miss = [];
   for (const k of REQUIRED) if (!String(dict[k] || "").trim()) miss.push(k);
   return miss;
 }
 
-/**
- * Load stage-specific BigFix config, falling back to root values if stage is not configured.
- */
 function getStageConfig(dictRaw, stage) {
   const prefix = stage.toUpperCase();
   const baseUrl = dictRaw[`${prefix}_BIGFIX_BASE_URL`] || dictRaw.BIGFIX_BASE_URL;
@@ -248,6 +264,12 @@ function buildCfg(dictRaw) {
 }
 
 let CURRENT = buildCfg(loadFromFileDict());
+
+// Safely populate process.env for any third-party libraries that rely on it
+Object.entries(loadFromFileDict()).forEach(([k, v]) => {
+  process.env[k] = SECRET_KEYS.has(k) ? b64d(v) : String(v ?? "");
+});
+
 function getCtx() { return CURRENT.ctx; }
 function getCfg() { return CURRENT.cfg; }
 

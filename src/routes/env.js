@@ -46,6 +46,10 @@ const UI_TO_ENV = {
   "SERVICENOW PASSWORD": "SN_PASSWORD",
   "SERVICENOW ALLOW SELF SIGNED": "SN_ALLOW_SELF_SIGNED",
 
+  "PRISM URL": "PRISM_BASE_URL",
+  "PRISM USERNAME": "PRISM_USER",
+  "PRISM PASSWORD": "PRISM_PASS",
+
   "VCENTER URL": "VCENTER_URL",
   "VCENTER USERNAME": "VCENTER_USER",
   "VCENTER PASSWORD": "VCENTER_PASSWORD",
@@ -66,7 +70,8 @@ const SECRET_KEYS = new Set([
   "PRODUCTION_BIGFIX_PASS",
   "SN_PASSWORD",
   "SMTP_PASSWORD",
-  "VCENTER_PASSWORD"
+  "VCENTER_PASSWORD",
+  "PRISM_PASS"
 ]);
 
 const b64e = (s) => Buffer.from(String(s ?? ""), "utf8").toString("base64");
@@ -121,7 +126,6 @@ router.get("/env/status", (req, res) => {
   }
 });
 
-// New endpoint: replicate root BigFix settings to all stages and save
 router.post("/env/replicate-bigfix", async (req, res) => {
   try {
     const current = envDictRaw();

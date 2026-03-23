@@ -45,6 +45,8 @@ function getSessionRole(req) {
 async function getBfAuthContext(req, ctx) {
     const { BIGFIX_USER, BIGFIX_PASS, httpsAgent } = ctx.bigfix;
     
+    // Background processes (like watcher/scheduler) that don't have a 'req' 
+    // will continue to use the system root account from .env
     if (!req) {
         return { httpsAgent, auth: { username: BIGFIX_USER, password: BIGFIX_PASS } };
     }
@@ -59,11 +61,9 @@ async function getBfAuthContext(req, ctx) {
 
     if (!requestUser) throw new Error("401_UNAUTHORIZED: No active user session found.");
 
-    // ⭐ MAGIC FIX: If the logged-in user matches the .env Service Account, ALWAYS use the .env password!
-    // This prevents the main admin from getting locked out or hitting 401s if DB gets out of sync.
-    if (requestUser.toLowerCase() === String(BIGFIX_USER).toLowerCase()) {
-        return { httpsAgent, auth: { username: BIGFIX_USER, password: BIGFIX_PASS } };
-    }
+    // 🚀 THE MAGIC BYPASS HAS BEEN REMOVED!
+    // Now ALL users (including Master Operators) MUST have valid credentials 
+    // stored in the database vault, otherwise they will get a 401 error.
 
     let finalUser = null;
     let finalPass = null;

@@ -4,13 +4,17 @@ const crypto = require('crypto');
 const ALGORITHM = 'aes-256-gcm';
 const IV_LENGTH = 16;
 
+let MASTER_KEY = null;
+
 const getMasterKey = () => {
-    const key = process.env.ENCRYPTION_KEY;
-    if (!key || key.length !== 32) {
-        console.warn("WARNING: ENCRYPTION_KEY in .env must be exactly 32 chars! Using fallback.");
-        return Buffer.alloc(32, key || "fallback_secret_key_needs_32_chr"); 
-    }
-    return Buffer.from(key, 'utf8');
+    if (MASTER_KEY) return MASTER_KEY;
+
+    // By this point, env.js has guaranteed that process.env.ENCRYPTION_KEY exists
+    const rawSecret = process.env.ENCRYPTION_KEY || "fallback_secret_key_needs_32_chr_patch_setu";
+    
+    // Hash it perfectly to 32 bytes and lock it in memory
+    MASTER_KEY = crypto.createHash('sha256').update(rawSecret).digest();
+    return MASTER_KEY;
 };
 
 function encrypt(text) {
