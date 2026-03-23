@@ -8,6 +8,7 @@ const { logFactory } = require("../utils/log");
 const { sendTriggerMail } = require("../mail/transport");
 const { sql, getPool } = require("../db/mssql"); 
 const { saveConfigToDB } = require("./config");
+const { scheduleActionStop } = require("../services/postpatchWatcher");
 
 function toCSV(serverList) {
   if (!serverList || serverList.length === 0) return null;
@@ -28,31 +29,6 @@ function getPatchWindowMs(patchWindow) {
     return legacyHours * 3600000;
   }
   return 0;
-}
-function msToXSDuration(ms) {
-  if (!Number.isFinite(ms) || ms === 0) return "PT0S";
-  const neg = ms < 0;
-  let t = Math.abs(ms);
-  const totalSeconds = Math.floor(t / 1000);
-  const days = Math.floor(totalSeconds / 86400);
-  let rem = totalSeconds % 86400;
-  const hours = Math.floor(rem / 3600);
-  rem = rem % 3600;
-  const minutes = Math.floor(rem / 60);
-  const seconds = rem % 60;
-  let out = "";
-  if (days) out += `${days}D`;
-  const timeParts = [];
-  if (hours) timeParts.push(`${hours}H`);
-  if (minutes) timeParts.push(`${minutes}M`);
-  if (seconds) timeParts.push(`${seconds}S`);
-  if (timeParts.length) out += `T${timeParts.join("")}`;
-  else if (!days) out = "T0S";
-  return (neg ? "-" : "") + "P" + out;
-}
-function localUtcOffsetMs() {
-  const offsetMin = new Date().getTimezoneOffset(); 
-  return -offsetMin * 60000; 
 }
 
 async function validateChangeNumber(number, ctx) {
@@ -104,8 +80,8 @@ async function triggerBaselineAction(req, ctx, {
   mailCc,
   mailBcc,
   environment,
-  endOffset,
-  triggeredBy 
+  triggeredBy,
+  expiresAt // 🚀 EXACT EXPIRATION
 }) {
   const { BIGFIX_BASE_URL, BIGFIX_USER, BIGFIX_PASS, httpsAgent } = ctx.bigfix;
   const log = logFactory(ctx.DEBUG_LOG);
@@ -113,7 +89,6 @@ async function triggerBaselineAction(req, ctx, {
 
   const qBaseline = `(name of site of it, id of it) of bes baseline whose (name of it is "${baselineName.replace(/"/g, '\\"')}")`;
   const urlBaseline = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(qBaseline)}`;
-  log(req, "Baseline lookup →", urlBaseline);
 
   const bfAuthOpts = await getBfAuthContext(req, ctx);
 
@@ -135,7 +110,6 @@ async function triggerBaselineAction(req, ctx, {
 
   const qGroup = `(name of it, id of it, name of site of it, (if automatic flag of it then "Automatic" else if manual flag of it then "manual" else "server based")) of bes computer group whose (name of it is "${groupName.replace(/"/g, '\\"')}")`;
   const urlGroup = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(qGroup)}`;
-  log(req, "Group lookup →", urlGroup);
   
   const groupResp = await axios.get(urlGroup, {
     ...bfAuthOpts,
@@ -148,19 +122,10 @@ async function triggerBaselineAction(req, ctx, {
   const groupRows = Array.isArray(groupResp.data?.result) ? groupResp.data.result : [];
 
   if (!groupRows.length) {
-      console.log(`[GroupSync] Group '${groupName}' not found in BigFix. Checking local DB...`);
       const pool = await getPool();
-      
-      const dbCheck = await pool.request()
-          .input('Name', sql.NVarChar(255), groupName)
-          .query("SELECT BigFixID FROM dbo.AssetOwnership WHERE AssetName = @Name AND AssetType = 'Group'");
-      
+      const dbCheck = await pool.request().input('Name', sql.NVarChar(255), groupName).query("SELECT BigFixID FROM dbo.AssetOwnership WHERE AssetName = @Name AND AssetType = 'Group'");
       if (dbCheck.recordset.length > 0) {
-          console.log(`[GroupSync] 'Ghost' group detected. Removing '${groupName}' from database.`);
-          await pool.request()
-             .input('Name', sql.NVarChar(255), groupName)
-             .query("DELETE FROM dbo.AssetOwnership WHERE AssetName = @Name AND AssetType = 'Group'");
-             
+          await pool.request().input('Name', sql.NVarChar(255), groupName).query("DELETE FROM dbo.AssetOwnership WHERE AssetName = @Name AND AssetType = 'Group'");
           throw new Error(`Group '${groupName}' has been deleted from the BigFix Console. It was removed from your list. Please create it again.`);
       } else {
           throw new Error(`Group '${groupName}' does not exist in BigFix.`);
@@ -203,11 +168,11 @@ async function triggerBaselineAction(req, ctx, {
 
   const stageName = environment || "Pilot";
   const actionTitle = `BPS_${baselineName}_${stageName}`;
-  const xmlOffset = endOffset || "P2D";
-  const xml = `<?xml version="1.0" encoding="UTF-8"?><BES xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="BES.xsd"><SourcedFixletAction><SourceFixlet><Sitename>${escapeXML(siteName)}</Sitename><FixletID>${escapeXML(fixletId)}</FixletID><Action>Action1</Action></SourceFixlet><Target><CustomRelevance>${escapeXML(customRelevance)}</CustomRelevance></Target><Settings><HasEndTime>true</HasEndTime><EndDateTimeLocalOffset>${escapeXML(xmlOffset)}</EndDateTimeLocalOffset><UseUTCTime>true</UseUTCTime></Settings><Title>${escapeXML(actionTitle)}</Title></SourcedFixletAction></BES>`;
+  
+  // 🚀 NO HasEndTime IN XML
+  const xml = `<?xml version="1.0" encoding="UTF-8"?><BES xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="BES.xsd"><SourcedFixletAction><SourceFixlet><Sitename>${escapeXML(siteName)}</Sitename><FixletID>${escapeXML(fixletId)}</FixletID><Action>Action1</Action></SourceFixlet><Target><CustomRelevance>${escapeXML(customRelevance)}</CustomRelevance></Target><Settings><UseUTCTime>true</UseUTCTime></Settings><Title>${escapeXML(actionTitle)}</Title></SourcedFixletAction></BES>`;
 
   const bfPostUrl = joinUrl(BIGFIX_BASE_URL, "/api/actions");
-  log(req, `BF POST → ${bfPostUrl} body=${xml.length} chars`);
   const bfResp = await axios.post(bfPostUrl, xml, {
     ...bfAuthOpts,
     headers: { "Content-Type": "text/xml" },
@@ -215,7 +180,6 @@ async function triggerBaselineAction(req, ctx, {
     validateStatus: () => true,
     responseType: "text",
   });
-  log(req, `BF POST ← ${bfResp.status}`);
 
   if (bfResp.status < 200 || bfResp.status >= 300) throw new Error(`BigFix POST failed: HTTP ${bfResp.status} ${String(bfResp.data).slice(0, 200)}`);
 
@@ -227,6 +191,7 @@ async function triggerBaselineAction(req, ctx, {
     const metadata = {
       id: actionId,
       createdAt: new Date().toISOString(),
+      expiresAt, // 🚀 SAVE EXPIRATION
       stage: stageName,
       xml,
       baselineName,
@@ -236,7 +201,6 @@ async function triggerBaselineAction(req, ctx, {
       groupId: gId,
       groupSite: gSite,
       groupType: gType,
-      endOffset: xmlOffset,
       preMail: !!autoMail,
       smtpEnabled: smtpReady, 
       postMailSent: false,
@@ -246,7 +210,6 @@ async function triggerBaselineAction(req, ctx, {
     actionStore.lastActionId = actionId;
     actionStore.actions[actionId] = metadata;
 
-    // Save configuration globally for next stages
     if (stageName.toLowerCase() === "pilot") {
         CONFIG.lastPilotBaseline = baselineName;
         CONFIG.lastPilotGroup = gName;
@@ -263,9 +226,10 @@ async function triggerBaselineAction(req, ctx, {
         .input('Metadata', sql.NVarChar(sql.MAX), JSON.stringify(metadata))
         .input('PostMailSent', sql.Bit, 0)
         .query(`INSERT INTO dbo.ActionHistory (ActionID, Metadata, PostMailSent, CreatedAt) VALUES (@ActionID, @Metadata, @PostMailSent, SYSUTCDATETIME())`);
-    } catch (dbErr) {
-      log(req, `[${stageName}] FAILED to save Action ${actionId} to DB:`, dbErr.message);
-    }
+    } catch (dbErr) {}
+
+    // 🚀 TRIGGER EXACT TIME SCHEDULER
+    scheduleActionStop(ctx, actionId, metadata);
   }
 
   if (autoMail && smtpReady) { 
@@ -280,16 +244,15 @@ async function triggerBaselineAction(req, ctx, {
         SMTP_CC: ctx.smtp.SMTP_CC, SMTP_BCC: ctx.smtp.SMTP_BCC,
         csvContent: csvContent,
       });
-      log(req, `[${stageName}-mail] sent`);
     } catch (e) {
-      log(req, `[${stageName}-mail] send failed:`, e?.message || e);
+      emailError = e.message || String(e);
     }
   }
 
   return {
     actionId, siteName, fixletId, group: gName,
-    title: actionTitle, stage: stageName, endOffset: xmlOffset,
-    createdAt: new Date().toISOString()
+    title: actionTitle, stage: stageName,
+    createdAt: new Date().toISOString(), preMailError: emailError
   };
 }
 
@@ -301,7 +264,7 @@ function attachPilotRoutes(app, ctx) {
     log(req, `POST /api/${environment}/actions${isForced ? '/force' : ''}. User: [${triggeredBy || 'Unknown'}].`);
 
     try {
-      const { baselineName, groupName, chgNumber, requireChg = true, autoMail, mailTo, mailFrom, mailCc, mailBcc, patchWindow, endOffset } = req.body || {};
+      const { baselineName, groupName, chgNumber, requireChg = true, autoMail, mailTo, mailFrom, mailCc, mailBcc, patchWindow } = req.body || {};
 
       if (!baselineName || !groupName) {
         return res.status(400).json({ ok: false, error: "baselineName and groupName are required" });
@@ -317,27 +280,23 @@ function attachPilotRoutes(app, ctx) {
         }
       }
 
-      const timeInput = patchWindow || endOffset;
-      let chosenOffset = endOffset;
-      const pwMs = getPatchWindowMs(timeInput);
+      const pwMs = getPatchWindowMs(patchWindow);
+      
+      let expiresAt = 0; // 🚀 CALCULATE END TIME
       if (pwMs > 0) {
-        const tzMs = localUtcOffsetMs();
-        const deltaMs = pwMs - tzMs;
-        chosenOffset = msToXSDuration(deltaMs);
-      } else if (!chosenOffset) {
+        expiresAt = Date.now() + pwMs;
+      } else {
         return res.status(400).json({ ok: false, error: "Patch Window duration must be greater than zero." });
       }
 
       const out = await triggerBaselineAction(req, ctx, {
-        baselineName, groupName, autoMail, mailTo, mailFrom, mailCc, mailBcc, environment, endOffset: chosenOffset, triggeredBy
+        baselineName, groupName, autoMail, mailTo, mailFrom, mailCc, mailBcc, environment, triggeredBy, expiresAt
       });
 
       const payload = { ok: true, chgOk: !requireChg || isForced || true, forced: isForced, ...out };
-      log(req, `POST /api/${environment}/actions success →`, payload);
       return res.json(payload);
 
     } catch (err) {
-      log(req, `Trigger Error:`, err?.message || err);
       res.status(500).json({ ok: false, error: String(err?.message || err) });
     }
   };

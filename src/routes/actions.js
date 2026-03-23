@@ -7,6 +7,7 @@ const { logFactory } = require("../utils/log");
 const { sendTriggerMail } = require("../mail/transport");
 const { sql, getPool } = require("../db/mssql"); 
 const { saveConfigToDB } = require("./config");
+const { scheduleActionStop } = require("../services/postpatchWatcher");
 
 function toCSV(serverList) {
   if (!serverList || serverList.length === 0) return null;
@@ -30,26 +31,6 @@ function attachActionsRoutes(app, ctx) {
     const legacyHours = Number(patchWindow);
     if (Number.isFinite(legacyHours) && legacyHours > 0) return legacyHours * 3600000;
     return 0;
-  }
-
-  function msToXSDuration(ms) {
-    if (!Number.isFinite(ms) || ms === 0) return "PT0S";
-    const neg = ms < 0; let t = Math.abs(ms);
-    const totalSeconds = Math.floor(t / 1000);
-    const days = Math.floor(totalSeconds / 86400); let rem = totalSeconds % 86400;
-    const hours = Math.floor(rem / 3600); rem = rem % 3600;
-    const minutes = Math.floor(rem / 60); const seconds = rem % 60;
-    let out = ""; if (days) out += `${days}D`;
-    const timeParts = [];
-    if (hours) timeParts.push(`${hours}H`);
-    if (minutes) timeParts.push(`${minutes}M`);
-    if (seconds) timeParts.push(`${seconds}S`);
-    if (timeParts.length) out += `T${timeParts.join("")}`; else if (!days) out = "T0S";
-    return (neg ? "-" : "") + "P" + out;
-  }
-
-  function localUtcOffsetMs() {
-    return -new Date().getTimezoneOffset() * 60000; 
   }
 
   app.post("/api/actions/restart", async (req, res) => {
@@ -188,12 +169,15 @@ function attachActionsRoutes(app, ctx) {
       
       const pwMs = getPatchWindowMs(patchWindow || endOffsetHours || enddatetimelocaloffset || endOffset);
       if (pwMs <= 0) return res.status(400).json({ ok: false, error: "Patch Window duration must be > 0" });
-      const endDateTimeLocalOffsetVal = msToXSDuration(pwMs - localUtcOffsetMs());
+      
+      // 🚀 Exact Expiration Time for our Node Scheduler
+      const expiresAt = Date.now() + pwMs;
 
-      // 5) Build & POST Action XML
+      // 5) Build & POST Action XML (NO HASENDTIME)
       const envLabel = (forcedEnvironment || environment || "Sandbox").toString().trim();
       const actionTitle = `BPS_${baselineName}_${envLabel}`;
-      const xml = `<?xml version="1.0" encoding="UTF-8"?><BES xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="BES.xsd"><SourcedFixletAction><SourceFixlet><Sitename>${escapeXML(siteName)}</Sitename><FixletID>${escapeXML(fixletId)}</FixletID><Action>Action1</Action></SourceFixlet><Target><CustomRelevance>${escapeXML(customRelevance)}</CustomRelevance></Target><Settings><HasEndTime>true</HasEndTime><EndDateTimeLocalOffset>${escapeXML(endDateTimeLocalOffsetVal)}</EndDateTimeLocalOffset><UseUTCTime>true</UseUTCTime></Settings><Title>${escapeXML(actionTitle)}</Title></SourcedFixletAction></BES>`;
+      
+      const xml = `<?xml version="1.0" encoding="UTF-8"?><BES xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="BES.xsd"><SourcedFixletAction><SourceFixlet><Sitename>${escapeXML(siteName)}</Sitename><FixletID>${escapeXML(fixletId)}</FixletID><Action>Action1</Action></SourceFixlet><Target><CustomRelevance>${escapeXML(customRelevance)}</CustomRelevance></Target><Settings><UseUTCTime>true</UseUTCTime></Settings><Title>${escapeXML(actionTitle)}</Title></SourcedFixletAction></BES>`;
 
       const bfPostUrl = joinUrl(BIGFIX_BASE_URL, "/api/actions");
       const bfResp = await axios.post(bfPostUrl, xml, { ...bfAuthOpts, headers: { "Content-Type": "text/xml" }, validateStatus: () => true, responseType: "text" });
@@ -204,7 +188,24 @@ function attachActionsRoutes(app, ctx) {
       let emailError = null;
 
       if (actionId) {
-        const metadata = { id: actionId, createdAt: new Date().toISOString(), stage: envLabel, xml, baselineName, baselineSite: siteName, baselineFixletId: fixletId, groupName: gName, groupId: gId, groupSite: gSite, groupType: gType, endOffset: endDateTimeLocalOffsetVal, preMail: !!shouldMail, smtpEnabled: smtpReady, postMailSent: false, triggeredBy: triggeredBy || "Unknown" };
+        const metadata = { 
+          id: actionId, 
+          createdAt: new Date().toISOString(), 
+          expiresAt, // 🚀 SAVE EXPIRATION FOR SCHEDULER
+          stage: envLabel, 
+          xml, 
+          baselineName, 
+          baselineSite: siteName, 
+          baselineFixletId: fixletId, 
+          groupName: gName, 
+          groupId: gId, 
+          groupSite: gSite, 
+          groupType: gType, 
+          preMail: !!shouldMail, 
+          smtpEnabled: smtpReady, 
+          postMailSent: false, 
+          triggeredBy: triggeredBy || "Unknown" 
+        };
         actionStore.lastActionId = actionId; 
         actionStore.actions[actionId] = metadata;
 
@@ -218,14 +219,17 @@ function attachActionsRoutes(app, ctx) {
           const pool = await getPool();
           await pool.request().input("ActionID", sql.Int, Number(actionId)).input("Metadata", sql.NVarChar(sql.MAX), JSON.stringify(metadata)).input("PostMailSent", sql.Bit, 0).query(`INSERT INTO dbo.ActionHistory (ActionID, Metadata, PostMailSent, CreatedAt) VALUES (@ActionID, @Metadata, @PostMailSent, SYSUTCDATETIME())`);
         } catch (dbErr) { }
+
+        // 🚀 TRIGGER EXACT TIME SCHEDULER
+        scheduleActionStop(ctx, actionId, metadata);
       }
 
       if (shouldMail && smtpReady) {
-        try { await sendTriggerMail(ctx.smtp, { environment: envLabel, baselineName, baselineSite: siteName, baselineFixletId: fixletId, groupName: gName, groupId: gId, groupSite: gSite, groupType: gType, actionId, endOffset: endDateTimeLocalOffsetVal, emailTo: mailTo, emailFrom: mailFrom, emailCc: mailCc, emailBcc: mailBcc, SMTP_FROM, SMTP_TO, SMTP_CC, SMTP_BCC, csvContent }); } 
+        try { await sendTriggerMail(ctx.smtp, { environment: envLabel, baselineName, baselineSite: siteName, baselineFixletId: fixletId, groupName: gName, groupId: gId, groupSite: gSite, groupType: gType, actionId, emailTo: mailTo, emailFrom: mailFrom, emailCc: mailCc, emailBcc: mailBcc, SMTP_FROM, SMTP_TO, SMTP_CC, SMTP_BCC, csvContent }); } 
         catch (e) { emailError = e.message || String(e); }
       }
 
-      return res.json({ ok: true, actionId, siteName, fixletId, group: gName, title: actionTitle, stage: envLabel, endOffset: endDateTimeLocalOffsetVal, createdAt: new Date().toISOString(), preMail: shouldMail, preMailError: emailError });
+      return res.json({ ok: true, actionId, siteName, fixletId, group: gName, title: actionTitle, stage: envLabel, createdAt: new Date().toISOString(), preMail: shouldMail, preMailError: emailError });
     } catch (err) { return res.status(500).json({ ok: false, error: err?.response?.data || err.message }); }
   }
 
