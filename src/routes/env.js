@@ -1,8 +1,11 @@
 // src/routes/env.js
 const express = require("express");
+const sql = require("mssql");
 const router = express.Router();
-const { readEnvFile, saveEnvAndReload } = require("../env");
+const { getPool } = require("../db/mssql");
+const { getCfg, loadDbConfig } = require("../env");
 const { updateConsoleLogLevel } = require('../services/logger');
+const { encrypt } = require('../utils/crypto');
 
 const UI_TO_ENV = {
   // Root BigFix
@@ -30,6 +33,7 @@ const UI_TO_ENV = {
   "PRODUCTION BIGFIX ALLOW SELF SIGNED": "PRODUCTION_BIGFIX_ALLOW_SELF_SIGNED",
 
   // Existing settings (unchanged)
+  "SESSION TIMEOUT (MINUTES)": "SESSION_TIMEOUT", // 🚀 Added missing UI mapped key
   "SMTP HOST": "SMTP_HOST",
   "EMAIL FROM": "SMTP_FROM",
   "EMAIL TO": "SMTP_TO",
@@ -74,14 +78,39 @@ const SECRET_KEYS = new Set([
   "PRISM_PASS"
 ]);
 
-const b64e = (s) => Buffer.from(String(s ?? ""), "utf8").toString("base64");
 const normalizeDebugLevel = (v) => (String(v || 'info').toLowerCase() === '1' || String(v).toLowerCase() === 'debug') ? '1' : '0';
 
 function envDictRaw() {
-  const items = readEnvFile();
-  const dict = {};
-  for (const { key, value } of items) dict[key] = value;
+  // Return the live active config instead of just the file
+  const activeCfg = getCfg();
+  // Ensure we format it the way the UI expects
+  const dict = { ...activeCfg }; 
+  
+  // Hide passwords in the payload going back to UI
+  for (const k of SECRET_KEYS) {
+      if (dict[k]) dict[k] = ""; 
+  }
+  
   return dict;
+}
+
+// 🚀 Helper to save dynamically to the SQL Database securely
+async function saveToDbSecurely(updates) {
+    const pool = await getPool();
+    for (const [k, v] of Object.entries(updates)) {
+        await pool.request()
+            .input('key', sql.NVarChar, k)
+            .input('val', sql.NVarChar, v)
+            .query(`
+                MERGE dbo.AppConfiguration AS target
+                USING (SELECT @key AS ConfigKey, @val AS ConfigValue) AS source
+                ON (target.ConfigKey = source.ConfigKey)
+                WHEN MATCHED THEN UPDATE SET ConfigValue = source.ConfigValue, UpdatedAt = SYSUTCDATETIME()
+                WHEN NOT MATCHED THEN INSERT (ConfigKey, ConfigValue) VALUES (source.ConfigKey, source.ConfigValue);
+            `);
+    }
+    // Refresh memory from DB
+    await loadDbConfig();
 }
 
 router.get("/env", (req, res) => {
@@ -99,18 +128,26 @@ router.post("/env", express.json({ limit: "1mb" }), async (req, res) => {
     const raw = body.updates || body;
     if (!raw || typeof raw !== "object") return res.status(400).json({ ok: false, error: "invalid_payload" });
 
-    const updates = {};
+    const dbUpdates = {};
     for (const [uiKey, val] of Object.entries(raw)) {
       const envKey = UI_TO_ENV[uiKey] || uiKey; 
       let outVal = val;
+      
       if (envKey === "DEBUG_LOG") outVal = normalizeDebugLevel(val);
       if (typeof outVal === "boolean") outVal = outVal ? "true" : "false";
-      if (SECRET_KEYS.has(envKey) && outVal != null && outVal !== "") outVal = b64e(outVal);
-      updates[envKey] = String(outVal ?? "");
+      
+      // 🚀 ENCRYPT USING AES
+      if (SECRET_KEYS.has(envKey) && outVal != null && outVal !== "") {
+          outVal = encrypt(String(outVal)); 
+      }
+      
+      dbUpdates[envKey] = String(outVal ?? "");
     }
 
-    saveEnvAndReload(updates);
+    // Save strictly to DB instead of .env file
+    await saveToDbSecurely(dbUpdates);
     updateConsoleLogLevel();
+    
     res.json({ ok: true, values: envDictRaw() });
   } catch (e) {
     res.status(500).json({ ok: false, error: "save_failed", detail: String(e.message || e) });
@@ -128,23 +165,26 @@ router.get("/env/status", (req, res) => {
 
 router.post("/env/replicate-bigfix", async (req, res) => {
   try {
-    const current = envDictRaw();
+    const current = getCfg();
+    const encryptedPass = encrypt(current.BIGFIX_PASS); // Re-encrypt for storage
+    
     const updates = {
       "SANDBOX_BIGFIX_BASE_URL": current.BIGFIX_BASE_URL,
       "SANDBOX_BIGFIX_USER": current.BIGFIX_USER,
-      "SANDBOX_BIGFIX_PASS": current.BIGFIX_PASS,
-      "SANDBOX_BIGFIX_ALLOW_SELF_SIGNED": current.BIGFIX_ALLOW_SELF_SIGNED,
+      "SANDBOX_BIGFIX_PASS": encryptedPass,
+      "SANDBOX_BIGFIX_ALLOW_SELF_SIGNED": String(current.BIGFIX_ALLOW_SELF_SIGNED),
       "PILOT_BIGFIX_BASE_URL": current.BIGFIX_BASE_URL,
       "PILOT_BIGFIX_USER": current.BIGFIX_USER,
-      "PILOT_BIGFIX_PASS": current.BIGFIX_PASS,
-      "PILOT_BIGFIX_ALLOW_SELF_SIGNED": current.BIGFIX_ALLOW_SELF_SIGNED,
+      "PILOT_BIGFIX_PASS": encryptedPass,
+      "PILOT_BIGFIX_ALLOW_SELF_SIGNED": String(current.BIGFIX_ALLOW_SELF_SIGNED),
       "PRODUCTION_BIGFIX_BASE_URL": current.BIGFIX_BASE_URL,
       "PRODUCTION_BIGFIX_USER": current.BIGFIX_USER,
-      "PRODUCTION_BIGFIX_PASS": current.BIGFIX_PASS,
-      "PRODUCTION_BIGFIX_ALLOW_SELF_SIGNED": current.BIGFIX_ALLOW_SELF_SIGNED,
+      "PRODUCTION_BIGFIX_PASS": encryptedPass,
+      "PRODUCTION_BIGFIX_ALLOW_SELF_SIGNED": String(current.BIGFIX_ALLOW_SELF_SIGNED),
     };
-    saveEnvAndReload(updates);
-    res.json({ ok: true, message: "Root BigFix settings replicated to Sandbox, Pilot, and Production" });
+    
+    await saveToDbSecurely(updates);
+    res.json({ ok: true, message: "Root BigFix settings securely replicated to Sandbox, Pilot, and Production" });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   }

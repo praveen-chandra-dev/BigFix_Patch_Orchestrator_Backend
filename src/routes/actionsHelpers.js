@@ -1,10 +1,10 @@
 // src/routes/actionsHelpers.js
 const axios = require("axios");
-const { joinUrl } = require("../utils/http");
+const { joinUrl, getBfAuthContext } = require("../utils/http");
 const { parseTupleRows } = require("../utils/query");
 const { actionStore } = require("../state/store");
 const { logFactory } = require("../utils/log");
-const { getBfAuthContext } = require("../utils/http");
+const { triggerEarlyStop } = require("../services/postpatchWatcher"); // Import the new instant trigger
 
 function pickTag(text, tag) {
   const m = new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, "i").exec(text);
@@ -13,7 +13,7 @@ function pickTag(text, tag) {
 const pickStatusTop = (xml) => pickTag(xml, "Status");
 
 async function getActionStatusXml(bigfixCtx, id) {
-  const { BIGFIX_BASE_URL, BIGFIX_USER, BIGFIX_PASS, httpsAgent } = bigfixCtx;//
+  const { BIGFIX_BASE_URL, BIGFIX_USER, BIGFIX_PASS, httpsAgent } = bigfixCtx;
   const url = joinUrl(BIGFIX_BASE_URL, `/api/action/${id}/status`);
   const r = await axios.get(url, {
     httpsAgent,
@@ -25,12 +25,13 @@ async function getActionStatusXml(bigfixCtx, id) {
   });
   return { ok: r.status >= 200 && r.status < 300, text: String(r.data || "") };
 }
-// (Helper functions end)
 
+// Global object to track when we last logged a specific Action ID
+const statusLogThrottle = {};
 
 function attachActionHelpers(app, ctx) {
   const log = logFactory(ctx.DEBUG_LOG);
-  const { BIGFIX_BASE_URL, BIGFIX_USER, BIGFIX_PASS, httpsAgent } = ctx.bigfix;
+  const { BIGFIX_BASE_URL } = ctx.bigfix;
 
   app.get("/api/actions/last", (req, res) => {
     req._logStart = Date.now();
@@ -39,9 +40,18 @@ function attachActionHelpers(app, ctx) {
   });
 
   app.get("/api/actions/:id/status", async (req, res) => {
-    req._logStart = Date.now();
     const { id } = req.params;
-    log(req, "GET /api/actions/:id/status id=", id);
+    const now = Date.now();
+    
+    // Log throttle (every 5 mins) to prevent spam
+    const lastLogged = statusLogThrottle[id] || 0;
+    const shouldLog = (now - lastLogged) > 300000; 
+
+    if (shouldLog) {
+      req._logStart = now;
+      log(req, "GET /api/actions/:id/status id=", id);
+      statusLogThrottle[id] = now; 
+    }
     
     try {
       if (!id || id === "null" || id === "undefined") {
@@ -50,7 +60,7 @@ function attachActionHelpers(app, ctx) {
       
       const { ok, text } = await getActionStatusXml(ctx.bigfix, id);
       if (!ok) {
-        log(req, "BF GET status error:", text);
+        if (shouldLog) log(req, "BF GET status error:", text);
         if (String(text).toLowerCase().includes("id not found")) {
             return res.json({ ok: true, state: "expired", mailSent: true });
         }
@@ -58,17 +68,22 @@ function attachActionHelpers(app, ctx) {
       }
 
       const state = (pickStatusTop(text) || "Unknown").toLowerCase();
-      log(req, "Action state:", state);
+      if (shouldLog) log(req, "Action state:", state);
+
+      // 🚀 INSTANT CATCHER: If UI polling notices it stopped early, fire the email immediately!
+      const entry = actionStore.actions[id];
+      if (entry && !entry.postMailSent && (state === 'stopped' || state === 'expired')) {
+          triggerEarlyStop(ctx, id, state === 'stopped' ? "Stopped Manually (Console)" : "Expired");
+      }
 
       const mailSent = actionStore.actions[id]?.postMailSent || false;
 
       res.json({ ok: true, state, mailSent: state === 'expired' || mailSent });
     } catch (err) {
-      log(req, "Action status error:", err?.message || err);
+      if (shouldLog) log(req, "Action status error:", err?.message || err);
       res.status(500).json({ ok: false, error: String(err?.message || err), mailSent: false });
     }
   });
-
 
   app.get("/api/actions/:id/results", async (req, res) => {
     req._logStart = Date.now();
@@ -89,14 +104,11 @@ function attachActionHelpers(app, ctx) {
         ` (end time of it as string | "N/A"), (name of issuer of action of it as string | "N/A")) of results of bes action whose (id of it = ${id})`;
 
       const url = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(relevance)}`;
-      log(req, "BF GET →", url);
-
       const bfAuthOpts = await getBfAuthContext(req, ctx);
       const resp = await axios.get(url, {
           ...bfAuthOpts,
           headers: { Accept: "application/json" }
       });
-      log(req, "BF GET ←", resp.status);
 
       if (resp.status < 200 || resp.status >= 300) {
         log(req, "BF GET error payload (first 300):", String(resp.data).slice(0, 300));

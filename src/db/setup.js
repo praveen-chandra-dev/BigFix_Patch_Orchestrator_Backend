@@ -139,7 +139,15 @@ async function runDatabaseSetup() {
       }
     } catch(e) { logger.warn("PatchSchedule migration check failed: " + e.message); }
 
-    // DUMMY USERS INSERTION COMPLETELY REMOVED!
+    // 🚀 NEW: Secure App Configuration Table
+    await pool.request().query(`
+      IF OBJECT_ID('dbo.AppConfiguration', 'U') IS NULL
+      CREATE TABLE dbo.AppConfiguration (
+          [ConfigKey] NVARCHAR(128) NOT NULL PRIMARY KEY,
+          [ConfigValue] NVARCHAR(MAX) NULL,
+          [UpdatedAt] DATETIME2(3) DEFAULT SYSUTCDATETIME()
+      );
+    `);
 
     logger.info("[DB Setup] Database initialization complete.");
 

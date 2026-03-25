@@ -5,7 +5,7 @@ const https = require("https");
 const resolveCache = new Map(); 
 
 const vcenterClient = (ctx) => {
-  const config = ctx.servicenow || ctx.vcenter || {};
+  const config = ctx.vcenter || ctx.cfg || {};
   const VCENTER_URL = ctx.VCENTER_URL || config.VCENTER_URL || process.env.VCENTER_URL;
   const VCENTER_USER = ctx.VCENTER_USER || config.VCENTER_USER || process.env.VCENTER_USER;
   const VCENTER_PASSWORD = ctx.VCENTER_PASSWORD || config.VCENTER_PASSWORD || process.env.VCENTER_PASSWORD;
@@ -20,7 +20,8 @@ const vcenterClient = (ctx) => {
   const restBaseUrl = `https://${host}/rest`;
 
   const httpsAgent = new https.Agent({ 
-    rejectUnauthorized: String(VCENTER_ALLOW_SELF_SIGNED).toLowerCase() !== "true" 
+    rejectUnauthorized: String(VCENTER_ALLOW_SELF_SIGNED).toLowerCase() !== "true",
+    maxSockets: 15
   });
 
   const client = axios.create({
@@ -53,6 +54,8 @@ const vcenterClient = (ctx) => {
     return match ? match[1].trim() : null;
   };
 
+  let loginPromise = null;
+
   const postSoap = async (body) => {
     const xml = createEnvelope(body);
     try {
@@ -60,57 +63,60 @@ const vcenterClient = (ctx) => {
       const data = typeof res.data === 'string' ? res.data : String(res.data);
       if (data.includes("Fault>") || data.includes(":Fault>")) {
          const fault = extractVal(data, "faultstring");
+         
+         // Reset cache on timeout/auth errors
+         if (fault && (fault.toLowerCase().includes("notauthenticated") || fault.toLowerCase().includes("session"))) {
+             loginPromise = null;
+         }
+
          const errMsg = fault || `Unknown SOAP Fault. RAW Response: ${data.substring(0, 300)}...`;
          return { error: errMsg }; 
       }
       return { data };
     } catch (err) {
+      if (err.response && [401, 403].includes(err.response.status)) loginPromise = null;
       throw new Error(`VCenter Connection Failed: ${err.message}`);
     }
   };
 
-  let loginPromise = null;
   async function connectAndLogin() {
     if (loginPromise) return loginPromise;
     loginPromise = (async () => {
-      const svcRes = await postSoap(`<urn:RetrieveServiceContent><urn:_this type="ServiceInstance">ServiceInstance</urn:_this></urn:RetrieveServiceContent>`);
-      if (svcRes.error) throw new Error(`ServiceContent Error: ${svcRes.error}`);
-
-      const sessionManager = extractVal(svcRes.data, "sessionManager");
-      const propertyCollector = extractVal(svcRes.data, "propertyCollector");
-      const customizationSpecManager = extractVal(svcRes.data, "customizationSpecManager");
-      const searchIndex = extractVal(svcRes.data, "searchIndex");
-
-      if (!sessionManager) throw new Error("Failed to retrieve VCenter ServiceContent");
-
-      let plainPass = VCENTER_PASSWORD;
       try {
-        if (/^[A-Za-z0-9+/=]+$/.test(VCENTER_PASSWORD) && VCENTER_PASSWORD.length % 4 === 0) {
-           const decoded = Buffer.from(VCENTER_PASSWORD, 'base64').toString('utf-8');
-           if (decoded) plainPass = decoded;
+        const svcRes = await postSoap(`<urn:RetrieveServiceContent><urn:_this type="ServiceInstance">ServiceInstance</urn:_this></urn:RetrieveServiceContent>`);
+        if (svcRes.error) throw new Error(`ServiceContent Error: ${svcRes.error}`);
+
+        const sessionManager = extractVal(svcRes.data, "sessionManager");
+        const propertyCollector = extractVal(svcRes.data, "propertyCollector");
+        const customizationSpecManager = extractVal(svcRes.data, "customizationSpecManager");
+        const searchIndex = extractVal(svcRes.data, "searchIndex");
+
+        if (!sessionManager) throw new Error("Failed to retrieve VCenter ServiceContent");
+
+        const safeUser = VCENTER_USER.replace(/[<>&'"]/g, c => `&#${c.charCodeAt(0)};`);
+        const safePass = VCENTER_PASSWORD.replace(/[<>&'"]/g, c => `&#${c.charCodeAt(0)};`);
+
+        const loginRes = await client.post("", createEnvelope(`
+          <urn:Login>
+             <urn:_this type="SessionManager">${sessionManager}</urn:_this>
+             <urn:userName>${safeUser}</urn:userName>
+             <urn:password>${safePass}</urn:password>
+          </urn:Login>
+        `));
+
+        const loginData = String(loginRes.data);
+        if (loginData.includes("Fault>")) {
+           throw new Error(`VCenter Login Error: ${extractVal(loginData, "faultstring") || "Unknown"}`);
         }
-      } catch (e) {}
 
-      const safeUser = VCENTER_USER.replace(/[<>&'"]/g, c => `&#${c.charCodeAt(0)};`);
-      const safePass = plainPass.replace(/[<>&'"]/g, c => `&#${c.charCodeAt(0)};`);
+        const cookie = loginRes.headers['set-cookie'];
+        client.defaults.headers.Cookie = cookie;
 
-      const loginRes = await client.post("", createEnvelope(`
-        <urn:Login>
-           <urn:_this type="SessionManager">${sessionManager}</urn:_this>
-           <urn:userName>${safeUser}</urn:userName>
-           <urn:password>${safePass}</urn:password>
-        </urn:Login>
-      `));
-
-      const loginData = String(loginRes.data);
-      if (loginData.includes("Fault>")) {
-         throw new Error(`VCenter Login Error: ${extractVal(loginData, "faultstring") || "Unknown"}`);
+        return { propertyCollector, customizationSpecManager, searchIndex };
+      } catch (e) {
+        loginPromise = null;
+        throw e;
       }
-
-      const cookie = loginRes.headers['set-cookie'];
-      client.defaults.headers.Cookie = cookie;
-
-      return { propertyCollector, customizationSpecManager, searchIndex };
     })();
     return loginPromise;
   }
@@ -206,15 +212,7 @@ const vcenterClient = (ctx) => {
 
   async function getRestInventory() {
     try {
-      let plainPass = VCENTER_PASSWORD;
-      try {
-        if (/^[A-Za-z0-9+/=]+$/.test(VCENTER_PASSWORD) && VCENTER_PASSWORD.length % 4 === 0) {
-           const decoded = Buffer.from(VCENTER_PASSWORD, 'base64').toString('utf-8');
-           if (decoded) plainPass = decoded;
-        }
-      } catch (e) {}
-
-      const auth = "Basic " + Buffer.from(`${VCENTER_USER}:${plainPass}`).toString('base64');
+      const auth = "Basic " + Buffer.from(`${VCENTER_USER}:${VCENTER_PASSWORD}`).toString('base64');
       const sessRes = await restClient.post("/com/vmware/cis/session", null, { headers: { Authorization: auth } });
       const sessionId = sessRes.data.value;
       const headers = { "vmware-api-session-id": sessionId };
@@ -277,41 +275,85 @@ const vcenterClient = (ctx) => {
     return statuses;
   };
 
-  // 🚀 HIGH-SPEED PARALLEL RESOLUTION
   async function resolveTargets(targetList) {
     if (!targetList || !targetList.length) return [];
     try {
-      const { searchIndex } = await connectAndLogin();
-      
-      const resolved = await Promise.all(targetList.map(async (t) => {
-        let foundId = null;
-        if (t.ips && Array.isArray(t.ips)) {
-          // Parallel IP check
-          await Promise.all(t.ips.map(async (rawIp) => {
-            if (foundId) return; // short-circuit
-            const ip = String(rawIp).trim();
-            if (!ip) return;
-            
-            if (resolveCache.has(ip)) {
-                foundId = resolveCache.get(ip);
-                return;
-            }
+      let loginData = await connectAndLogin();
+      const resolved = [];
+      const ipv4Regex = /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/;
 
-            try {
-               const soapBody = `<urn:FindByIp><urn:_this type="SearchIndex">${searchIndex}</urn:_this><urn:ip>${ip}</urn:ip><urn:vmSearch>true</urn:vmSearch></urn:FindByIp>`;
-               const r = await postSoap(soapBody);
-               if (!r.error) {
-                   const vmId = extractVal(r.data, "returnval");
-                   if (vmId) { 
-                       foundId = vmId; 
-                       resolveCache.set(ip, vmId); 
-                   }
+      const BATCH_SIZE = 10;
+      for (let i = 0; i < targetList.length; i += BATCH_SIZE) {
+        const batch = targetList.slice(i, i + BATCH_SIZE);
+        
+        const batchPromises = batch.map(async (t) => {
+           let foundId = null;
+           
+           if (t.ips && Array.isArray(t.ips)) {
+              for (const rawIp of t.ips) {
+                 if (foundId) break;
+                 const ip = String(rawIp).trim();
+                 
+                 if (!ip || !ipv4Regex.test(ip)) continue; 
+                 
+                 if (resolveCache.has(ip)) {
+                     foundId = resolveCache.get(ip);
+                     continue;
+                 }
+
+                 try {
+                    let soapBody = `<urn:FindByIp><urn:_this type="SearchIndex">${loginData.searchIndex}</urn:_this><urn:ip>${ip}</urn:ip><urn:vmSearch>true</urn:vmSearch></urn:FindByIp>`;
+                    let r = await postSoap(soapBody);
+                    
+                    if (r.error && r.error.toLowerCase().includes("notauthenticated")) {
+                        loginData = await connectAndLogin();
+                        soapBody = `<urn:FindByIp><urn:_this type="SearchIndex">${loginData.searchIndex}</urn:_this><urn:ip>${ip}</urn:ip><urn:vmSearch>true</urn:vmSearch></urn:FindByIp>`;
+                        r = await postSoap(soapBody);
+                    }
+
+                    if (!r.error) {
+                        const vmId = extractVal(r.data, "returnval");
+                        if (vmId) { 
+                            foundId = vmId; 
+                            resolveCache.set(ip, vmId); 
+                        }
+                    }
+                 } catch(e) { } 
+              }
+           }
+
+           if (!foundId && t.name) {
+               const nameLower = String(t.name).toLowerCase();
+               if (resolveCache.has(nameLower)) {
+                   foundId = resolveCache.get(nameLower);
+               } else {
+                   try {
+                       let soapBody = `<urn:FindByDnsName><urn:_this type="SearchIndex">${loginData.searchIndex}</urn:_this><urn:dnsName>${t.name}</urn:dnsName><urn:vmSearch>true</urn:vmSearch></urn:FindByDnsName>`;
+                       let r = await postSoap(soapBody);
+                       
+                       if (r.error && r.error.toLowerCase().includes("notauthenticated")) {
+                           loginData = await connectAndLogin();
+                           soapBody = `<urn:FindByDnsName><urn:_this type="SearchIndex">${loginData.searchIndex}</urn:_this><urn:dnsName>${t.name}</urn:dnsName><urn:vmSearch>true</urn:vmSearch></urn:FindByDnsName>`;
+                           r = await postSoap(soapBody);
+                       }
+
+                       if (!r.error) {
+                           const vmId = extractVal(r.data, "returnval");
+                           if (vmId) { 
+                               foundId = vmId; 
+                               resolveCache.set(nameLower, vmId); 
+                           }
+                       }
+                   } catch(e) { } 
                }
-            } catch(e) {}
-          }));
-        }
-        return foundId ? { ...t, id: foundId } : null;
-      }));
+           }
+
+           return foundId ? { ...t, id: foundId } : null;
+        });
+
+        const results = await Promise.all(batchPromises);
+        resolved.push(...results);
+      }
 
       return resolved.filter(Boolean);
     } catch (e) { throw e; }

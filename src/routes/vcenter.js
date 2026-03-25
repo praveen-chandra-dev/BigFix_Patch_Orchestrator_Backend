@@ -1,4 +1,4 @@
-// bigfix-backend/src/routes/vcenter.js
+// src/routes/vcenter.js
 const { vcenterClient } = require("../services/vcenter");
 const { logFactory } = require("../utils/log");
 const { sql, getPool } = require("../db/mssql"); 
@@ -6,82 +6,60 @@ const { bigfixClient } = require("../services/bigfix");
 const axios = require('axios');
 const https = require('https');
 
-// --- 1. SSL & Auth Helpers ---
-// Create a dedicated agent to force bypass of Self-Signed Cert errors
 const agent = new https.Agent({ rejectUnauthorized: false });
 
-// Helper to decode Base64 password from .env if needed
-function decodePassword(raw) {
-    if (!raw) return "";
-    try {
-        // Simple check: if it looks like Base64 (no spaces, ends in = or alphanumeric), try decode
-        if (/^[A-Za-z0-9+/=]+$/.test(raw) && raw.length % 4 === 0) {
-             const decoded = Buffer.from(raw, 'base64').toString('utf-8');
-             // Sanity check: verify it didn't turn into garbage
-             if (decoded && !/[\x00-\x08\x0E-\x1F]/.test(decoded)) {
-                 return decoded;
-             }
-        }
-    } catch (e) {
-        // If decode fails, assume it was plain text
-    }
-    return raw; 
-}
-
-// Helper: Get Session ID (Robust REST Implementation for Lookup)
-async function getRobustSession(url, user, passEncoded) {
-    const password = decodePassword(passEncoded);
-    
-    // Ensure URL is clean
+async function getRobustSession(url, user, password) {
     const cleanUrl = (url || "").replace(/\/+$/, ""); 
     
     try {
+        // 🚀 FIX: Pass the raw, pristine password. No aggressive base64 decoding!
         const res = await axios.post(`${cleanUrl}/rest/com/vmware/cis/session`, {}, {
             httpsAgent: agent,
             auth: { username: user, password: password },
             headers: { "Content-Type": "application/json", "Accept": "application/json" },
-            timeout: 10000 // 10s timeout for login
+            timeout: 10000 
         });
         return res.data.value;
     } catch (e) {
         console.error("[VCenter Login] Failed:", e.message);
-        if (e.response) console.error("Details:", JSON.stringify(e.response.data));
         throw e;
     }
 }
 
 function attachVcenterRoutes(app, ctx) {
   const log = logFactory(ctx.DEBUG_LOG);
-  
-  // Expose ctx to app locals if not already present
-  if (!app.locals.ctx) {
-      app.locals.ctx = ctx;
-  }
+  if (!app.locals.ctx) app.locals.ctx = ctx;
 
-  // --- PREPARE SAFE CONTEXT ---
-  // We create a modified context where the password is pre-decoded.
-  // This ensures the 'vcenterClient' service (used for Snapshot/Clone) gets the correct credentials.
-  const vcenterCtx = { 
-      ...ctx, 
-      vcenter: { 
-          ...ctx.vcenter, 
-          // Ensure we pull from ctx.vcenter first, then decode
-          VCENTER_PASSWORD: decodePassword(ctx.vcenter?.VCENTER_PASSWORD || ctx.cfg?.VCENTER_PASSWORD || "") 
-      } 
+  const getDynamicCtx = (req) => {
+      const currentCtx = req.app.locals.ctx || ctx;
+      // 🚀 FIX: env.js already decrypts DB secrets, so we just pass them straight through.
+      const password = currentCtx.cfg?.VCENTER_PASSWORD || currentCtx.vcenter?.VCENTER_PASSWORD || currentCtx.VCENTER_PASSWORD || "";
+      const url = currentCtx.cfg?.VCENTER_URL || currentCtx.vcenter?.VCENTER_URL || currentCtx.VCENTER_URL || "";
+      const user = currentCtx.cfg?.VCENTER_USER || currentCtx.vcenter?.VCENTER_USER || currentCtx.VCENTER_USER || "";
+      
+      return { 
+          ...currentCtx, 
+          VCENTER_PASSWORD: password,
+          VCENTER_URL: url,
+          VCENTER_USER: user,
+          vcenter: {
+              ...currentCtx.vcenter,
+              VCENTER_URL: url,
+              VCENTER_USER: user,
+              VCENTER_PASSWORD: password
+          }
+      };
   };
 
   const checkConfig = (req, res, next) => {
-    // Dynamically pull context from app.locals to prevent scope loss
-    const currentCtx = req.app.locals.ctx || ctx;
-    const hasUrl = currentCtx.VCENTER_URL || (currentCtx.vcenter && currentCtx.vcenter.VCENTER_URL);
-    if (!hasUrl) return res.status(503).json({ ok: false, error: "VCenter not configured." });
+    const dCtx = getDynamicCtx(req);
+    if (!dCtx.VCENTER_URL) return res.status(503).json({ ok: false, error: "VCenter not configured." });
     next();
   };
 
-  // --- 1. GET INVENTORY (Preserved) ---
   app.get("/api/vcenter/inventory", checkConfig, async (req, res) => {
     try {
-      const client = vcenterClient(vcenterCtx); // Pass safe context
+      const client = vcenterClient(getDynamicCtx(req)); 
       const inventory = await client.getRestInventory();
       res.json({ ok: true, inventory });
     } catch (e) {
@@ -90,70 +68,49 @@ function attachVcenterRoutes(app, ctx) {
     }
   });
 
-  // --- 2. IP/VM LOOKUP (FIXED & ROBUST) ---
-  // This replaces the old route with one that handles SSL and Search properly
   app.post("/api/vcenter/lookup", checkConfig, async (req, res) => {
     const { filter, targets } = req.body; 
+    const dCtx = getDynamicCtx(req);
     
-    // CASE A: Batch Lookup (Legacy/Background) - Uses the Service
     if (targets && Array.isArray(targets)) {
          try {
-           const client = vcenterClient(vcenterCtx);
+           const client = vcenterClient(dCtx);
            const matches = await client.resolveTargets(targets);
            return res.json({ ok: true, matches });
          } catch (e) { return res.status(500).json({ ok: false, error: e.message }); }
     }
 
-    // CASE B: Single Lookup (Search Bar) - Uses Robust Route
-    if (!filter || filter.length < 3) {
-      return res.json({ ok: true, found: false, results: [] });
-    }
+    if (!filter || filter.length < 3) return res.json({ ok: true, found: false, results: [] });
 
     try {
-      const currentCtx = req.app.locals.ctx || ctx;
-      const { VCENTER_URL, VCENTER_USER, VCENTER_PASSWORD } = currentCtx.vcenter;
+      const { VCENTER_URL, VCENTER_USER, VCENTER_PASSWORD } = dCtx;
       const cleanUrl = (VCENTER_URL || "").replace(/\/+$/, "");
 
-      // 1. Login (Robust)
       const sessionId = await getRobustSession(cleanUrl, VCENTER_USER, VCENTER_PASSWORD);
-      
-      // 2. Search
-      // We use the REST API 'names' filter which is standard for VCenter 6.5+
       const searchUrl = `${cleanUrl}/rest/vcenter/vm?names=${encodeURIComponent(filter)}`;
       
       const vmRes = await axios.get(searchUrl, {
         httpsAgent: agent,
         headers: { "vmware-api-session-id": sessionId, "Accept": "application/json" },
-        validateStatus: () => true // Don't throw on 404
+        validateStatus: () => true 
       });
 
       let vms = [];
-      if (vmRes.status === 200 && vmRes.data.value) {
-          vms = vmRes.data.value;
-      } else {
-          console.warn(`[VCenter Lookup] Search returned ${vmRes.status}`);
-      }
+      if (vmRes.status === 200 && vmRes.data.value) vms = vmRes.data.value;
       
-      const results = vms.map(vm => ({
-          id: vm.vm,          
-          name: vm.name,      
-          power_state: vm.power_state
-      }));
-      
+      const results = vms.map(vm => ({ id: vm.vm, name: vm.name, power_state: vm.power_state }));
       res.json({ ok: true, found: results.length > 0, results });
-
     } catch (error) {
       console.error("[VCenter Lookup Error]:", error.message);
       res.status(500).json({ ok: false, error: error.message });
     }
   });
 
-  // --- 3. SNAPSHOT (PRESERVED LOGIC) ---
   app.post("/api/vcenter/snapshot", checkConfig, async (req, res) => {
     const { vmIds, snapshotName, description, includeMemory, quiesce, vmNames } = req.body; 
     log(req, `VCenter Snapshot: ${vmIds?.length} VMs`);
     try {
-      const client = vcenterClient(vcenterCtx); // Uses decoded password
+      const client = vcenterClient(getDynamicCtx(req)); 
       const pool = await getPool();
       const getName = (id) => (vmNames && vmNames[id]) ? vmNames[id] : id;
       const results = [];
@@ -180,7 +137,6 @@ function attachVcenterRoutes(app, ctx) {
     } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   });
 
-  // --- 4. CLONE VM (PRESERVED LOGIC) ---
   app.post("/api/vcenter/clone", checkConfig, async (req, res) => {
     const { global, clones } = req.body; 
     if (!clones || !Array.isArray(clones)) return res.status(400).json({ok:false, error:"Missing clones array"});
@@ -189,7 +145,7 @@ function attachVcenterRoutes(app, ctx) {
     log(req, `VCenter Clone: Starting for ${clones.length} VMs.`);
 
     try {
-      const client = vcenterClient(vcenterCtx); // Uses decoded password
+      const client = vcenterClient(getDynamicCtx(req)); 
       const pool = await getPool();
       const results = [];
       
@@ -197,11 +153,8 @@ function attachVcenterRoutes(app, ctx) {
          const { id: vmId, cloneName, newIp, subnet, gateway, dns } = vm;
          const { host: hostId, datastore: datastoreId, folder: folderId, osSpec: osSpecName } = global;
 
-         log(req, `[Clone] Initiating: ${vm.name} -> ${cloneName} (${newIp})`);
-
          const cloneRes = await client.cloneVm(
-            vmId, 
-            cloneName, 
+            vmId, cloneName, 
             { hostId, datastoreId, folderId, osSpecName },
             { newIp, subnet, gateway, dns }
          );
@@ -224,17 +177,15 @@ function attachVcenterRoutes(app, ctx) {
       }
       res.json({ ok: true, results });
     } catch (e) {
-      console.error("[VCenter Clone Error]", e);
       res.status(500).json({ ok: false, error: e.message });
     }
   });
 
-  // --- 5. TASK STATUS (PRESERVED) ---
   app.post("/api/vcenter/tasks", checkConfig, async (req, res) => {
     const { taskIds } = req.body;
     if (!taskIds || !taskIds.length) return res.json({ ok: true, statuses: {} });
     try {
-      const client = vcenterClient(vcenterCtx);
+      const client = vcenterClient(getDynamicCtx(req));
       const statuses = await client.getTasksStatus(taskIds);
       const pool = await getPool();
       const simple = {};
@@ -252,7 +203,6 @@ function attachVcenterRoutes(app, ctx) {
     } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   });
 
-  // --- 6. HISTORY & VALIDATION (FIXED SCOPE) ---
   app.get("/api/vcenter/history", async (req, res) => {
     try {
       const pool = await getPool();
@@ -264,7 +214,6 @@ function attachVcenterRoutes(app, ctx) {
   app.post("/api/vcenter/validate", async (req, res) => {
     const { groupName, lookbackHours = 24 } = req.body;
     try {
-      // FIX: Dynamically pull context from app.locals to prevent 'bigfix' undefined errors
       const currentCtx = req.app.locals.ctx || ctx;
       
       if (!currentCtx || !currentCtx.bigfix) {

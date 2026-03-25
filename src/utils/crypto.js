@@ -37,9 +37,15 @@ function decrypt(encText) {
     if (!encText) return null;
     try {
         const decoded = Buffer.from(encText, 'base64').toString('utf8');
-        const [ivHex, tagHex, encrypted] = decoded.split(':');
-        if (!ivHex || !tagHex || !encrypted) return null;
+        const parts = decoded.split(':');
         
+        // 🚀 BACKWARD COMPATIBILITY: If it doesn't look like our new AES format, 
+        // treat it as the old legacy Base64 password.
+        if (parts.length !== 3 || parts[0].length !== 32) {
+            return Buffer.from(encText, 'base64').toString('utf8');
+        }
+        
+        const [ivHex, tagHex, encrypted] = parts;
         const iv = Buffer.from(ivHex, 'hex');
         const tag = Buffer.from(tagHex, 'hex');
         const key = getMasterKey();
@@ -50,6 +56,8 @@ function decrypt(encText) {
         decrypted += decipher.final('utf8');
         return decrypted;
     } catch (e) {
+        // Ultimate fallback just in case
+        try { return Buffer.from(encText, 'base64').toString('utf8'); } catch(err) {}
         console.error("[Crypto] Decrypt failed:", e.message);
         return null;
     }

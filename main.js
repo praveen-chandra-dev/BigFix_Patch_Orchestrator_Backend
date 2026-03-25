@@ -1,3 +1,4 @@
+// main.js
 require("dotenv").config({ quiet: true });
 const fs = require("fs");
 const https = require("https");
@@ -9,8 +10,8 @@ const { buildApp } = require("./src/app");
 const { logger } = require("./src/services/logger");
 const { runDatabaseSetup } = require("./src/db/setup"); 
 
-const { getCfg } = require("./src/env"); 
-
+// 🚀 Added loadDbConfig to imports
+const { getCfg, loadDbConfig } = require("./src/env"); 
 
 const cfg = getCfg();
 const PORT = Number(cfg.PORT || 5174);
@@ -109,7 +110,13 @@ function getSSLOptions() {
 
 async function startServer() {
   try {
+    // 1. Ensure DB schema exists
     await runDatabaseSetup();
+    
+    // 2. 🚀 Load secure configuration overrides from the database
+    await loadDbConfig(); 
+    
+    // 3. Build routes and start Express
     const app = buildApp();
     const httpsOptions = getSSLOptions();
     

@@ -1,7 +1,7 @@
 // src/routes/actions.js
 const axios = require("axios");
 const { joinUrl, toLowerSafe, escapeXML, getBfAuthContext } = require("../utils/http");
-const { collectStrings, extractActionIdFromXml } = require("../utils/query");
+const { collectStrings, extractActionIdFromXml, parseTupleRows } = require("../utils/query"); 
 const { actionStore, CONFIG } = require("../state/store");
 const { logFactory } = require("../utils/log");
 const { sendTriggerMail } = require("../mail/transport");
@@ -14,6 +14,29 @@ function toCSV(serverList) {
   const header = "ServerName";
   const rows = serverList.map((name) => `"${String(name).replace(/"/g, '""')}"`);
   return [header, ...rows].join("\r\n");
+}
+
+// 🚀 FETCH PATCH CONTENT QUERY
+async function fetchBaselinePatches(bigfixCtx, baselineName, bfAuthOpts) {
+  try {
+    const { BIGFIX_BASE_URL } = bigfixCtx;
+    const relevance = `((name of it | "N/A"), (source severity of it | "N/A"), (cve id list of it | "N/A"), (source of it | "N/A")) of source fixlets of components of component groups of bes fixlets whose (name of it as lowercase = "${String(baselineName).toLowerCase().replace(/"/g, '\\"')}")`;
+    const url = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(relevance)}`;
+    const resp = await axios.get(url, { ...bfAuthOpts, headers: { Accept: "application/json" } });
+    if (resp.status >= 200 && resp.status < 300) {
+        const rows = parseTupleRows(resp.data);
+        return rows.map(r => ({ name: r[0], severity: r[1], cves: r[2], source: r[3] }));
+    }
+  } catch (e) { }
+  return [];
+}
+
+function patchesToCSV(patches) {
+  if (!patches || !patches.length) return null;
+  const escape = (v) => `"${String(v || "").replace(/"/g, '""')}"`;
+  const lines = ["Patch Name,Severity,CVEs,Source"];
+  for (const p of patches) { lines.push(`${escape(p.name)},${escape(p.severity)},${escape(p.cves)},${escape(p.source)}`); }
+  return lines.join("\r\n");
 }
 
 function attachActionsRoutes(app, ctx) {
@@ -60,7 +83,9 @@ function attachActionsRoutes(app, ctx) {
       if (ids.length === 0) return res.status(404).json({ ok: false, error: "No valid Computer IDs found." });
 
       const targetXml = ids.map(id => `<ComputerID>${id}</ComputerID>`).join("");
-      const xml = `<?xml version="1.0" encoding="utf-8"?><BES xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" SkipUI="true"><SingleAction><Title>${escapeXML(`BPS_Restart_Bulk_${ids.length}_Computers`)}</Title><Relevance>true</Relevance><ActionScript>restart 60</ActionScript><SuccessCriteria Option="RunToCompletion"></SuccessCriteria><Settings /><SettingsLocks /><Target>${targetXml}</Target></SingleAction></BES>`;
+      
+      // FIX: Added MIMEType and CDATA block to properly execute the restart command without Syntax Error
+      const xml = `<?xml version="1.0" encoding="utf-8"?><BES xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" SkipUI="true"><SingleAction><Title>${escapeXML(`BPS_Restart_Bulk_${ids.length}_Computers`)}</Title><Relevance>true</Relevance><ActionScript MIMEType="application/x-Fixlet-Windows-Shell"><![CDATA[restart 60]]></ActionScript><SuccessCriteria Option="RunToCompletion"></SuccessCriteria><Settings /><SettingsLocks /><Target>${targetXml}</Target></SingleAction></BES>`;
 
       const bfPostUrl = joinUrl(BIGFIX_BASE_URL, "/api/actions");
       const bfResp = await axios.post(bfPostUrl, xml, {
@@ -93,7 +118,11 @@ function attachActionsRoutes(app, ctx) {
       if (parts.length === 0 || !/^\d+$/.test(parts[0])) return res.status(404).json({ ok: false, error: "Computer not found." });
       
       const computerId = parts[0];
-      const xml = `<?xml version="1.0" encoding="utf-8"?><BES xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" SkipUI="true"><SingleAction><Title>BPS_Window_Update_Service_Restart-${escapeXML(computerName)}</Title><Relevance>true</Relevance><ActionScript>waithidden cmd.exe /c sc config wuauserv start= autowaithidden cmd.exe /c sc start wuauserv</ActionScript><SuccessCriteria Option="RunToCompletion"></SuccessCriteria><Settings /><SettingsLocks /><Target><ComputerID>${computerId}</ComputerID></Target></SingleAction></BES>`;
+      
+      // FIX: Added MIMEType, CDATA, and properly split the two commands with a newline so they aren't mashed together
+      const actionScript = `waithidden cmd.exe /c sc config wuauserv start= auto\nwaithidden cmd.exe /c sc start wuauserv`;
+
+      const xml = `<?xml version="1.0" encoding="utf-8"?><BES xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" SkipUI="true"><SingleAction><Title>BPS_Window_Update_Service_Restart-${escapeXML(computerName)}</Title><Relevance>true</Relevance><ActionScript MIMEType="application/x-Fixlet-Windows-Shell"><![CDATA[${actionScript}]]></ActionScript><SuccessCriteria Option="RunToCompletion"></SuccessCriteria><Settings /><SettingsLocks /><Target><ComputerID>${computerId}</ComputerID></Target></SingleAction></BES>`;
       
       const bfPostUrl = joinUrl(BIGFIX_BASE_URL, "/api/actions");
       const bfResp = await axios.post(bfPostUrl, xml, {
@@ -112,7 +141,11 @@ function attachActionsRoutes(app, ctx) {
   async function triggerAction(req, res, forcedEnvironment) {
     const body = req.body || {};
     const { baselineName, groupName, autoMail, mailTo, mailFrom, mailCc, mailBcc, environment, patchWindow, enddatetimelocaloffset, endOffsetHours, endOffset, triggeredBy } = body;
-    const shouldMail = ["true", "1", "yes", "on", true, 1].includes(String(autoMail).toLowerCase());
+    
+    // FIX: Check the frontend payload FIRST, but fallback to the global CONFIG.autoMail setting
+    const frontendAutoMail = ["true", "1", "yes", "on", true, 1].includes(String(autoMail).toLowerCase());
+    const globalAutoMail = ["true", "1", "yes", "on", true, 1].includes(String(CONFIG.autoMail).toLowerCase());
+    const shouldMail = frontendAutoMail || globalAutoMail;
 
     try {
       if (!baselineName || !groupName) return res.status(400).json({ ok: false, error: "baselineName and groupName are required" });
@@ -152,13 +185,20 @@ function attachActionsRoutes(app, ctx) {
       const partsG = []; collectStrings(groupRows[0], partsG);
       if (partsG.length >= 4) [gName, gId, gSite, gType] = partsG; else return res.status(500).json({ ok: false, error: "Unexpected group query shape" });
 
-      // 3) CSV Generation
+      // 3) CSV & Patch Content Generation
       let csvContent = null;
+      let patchesCsvContent = null;
+      let baselinePatches = [];
+      
       if (shouldMail) {
         try {
           const urlServers = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(`names of members of bes computer group whose (id of it = ${gId})`)}`;
           const serversResp = await axios.get(urlServers, { ...bfAuthOpts, headers: { Accept: "application/json" }, validateStatus: () => true });
           if (serversResp.status === 200) csvContent = toCSV(Array.isArray(serversResp.data?.result) ? serversResp.data.result : []);
+          
+          // FETCH PATCHES
+          baselinePatches = await fetchBaselinePatches(ctx.bigfix, baselineName, bfAuthOpts);
+          patchesCsvContent = patchesToCSV(baselinePatches);
         } catch (e) { }
       }
 
@@ -170,10 +210,9 @@ function attachActionsRoutes(app, ctx) {
       const pwMs = getPatchWindowMs(patchWindow || endOffsetHours || enddatetimelocaloffset || endOffset);
       if (pwMs <= 0) return res.status(400).json({ ok: false, error: "Patch Window duration must be > 0" });
       
-      // 🚀 Exact Expiration Time for our Node Scheduler
       const expiresAt = Date.now() + pwMs;
 
-      // 5) Build & POST Action XML (NO HASENDTIME)
+      // 5) Build & POST Action XML
       const envLabel = (forcedEnvironment || environment || "Sandbox").toString().trim();
       const actionTitle = `BPS_${baselineName}_${envLabel}`;
       
@@ -189,22 +228,9 @@ function attachActionsRoutes(app, ctx) {
 
       if (actionId) {
         const metadata = { 
-          id: actionId, 
-          createdAt: new Date().toISOString(), 
-          expiresAt, // 🚀 SAVE EXPIRATION FOR SCHEDULER
-          stage: envLabel, 
-          xml, 
-          baselineName, 
-          baselineSite: siteName, 
-          baselineFixletId: fixletId, 
-          groupName: gName, 
-          groupId: gId, 
-          groupSite: gSite, 
-          groupType: gType, 
-          preMail: !!shouldMail, 
-          smtpEnabled: smtpReady, 
-          postMailSent: false, 
-          triggeredBy: triggeredBy || "Unknown" 
+          id: actionId, createdAt: new Date().toISOString(), expiresAt, stage: envLabel, xml, baselineName, baselineSite: siteName, 
+          baselineFixletId: fixletId, groupName: gName, groupId: gId, groupSite: gSite, groupType: gType, 
+          preMail: shouldMail, smtpEnabled: smtpReady, postMailSent: false, triggeredBy: triggeredBy || "Unknown" 
         };
         actionStore.lastActionId = actionId; 
         actionStore.actions[actionId] = metadata;
@@ -220,13 +246,21 @@ function attachActionsRoutes(app, ctx) {
           await pool.request().input("ActionID", sql.Int, Number(actionId)).input("Metadata", sql.NVarChar(sql.MAX), JSON.stringify(metadata)).input("PostMailSent", sql.Bit, 0).query(`INSERT INTO dbo.ActionHistory (ActionID, Metadata, PostMailSent, CreatedAt) VALUES (@ActionID, @Metadata, @PostMailSent, SYSUTCDATETIME())`);
         } catch (dbErr) { }
 
-        // 🚀 TRIGGER EXACT TIME SCHEDULER
         scheduleActionStop(ctx, actionId, metadata);
       }
 
+      // 6) Send Pre-Patch Trigger Mail
       if (shouldMail && smtpReady) {
-        try { await sendTriggerMail(ctx.smtp, { environment: envLabel, baselineName, baselineSite: siteName, baselineFixletId: fixletId, groupName: gName, groupId: gId, groupSite: gSite, groupType: gType, actionId, emailTo: mailTo, emailFrom: mailFrom, emailCc: mailCc, emailBcc: mailBcc, SMTP_FROM, SMTP_TO, SMTP_CC, SMTP_BCC, csvContent }); } 
-        catch (e) { emailError = e.message || String(e); }
+        try { 
+            await sendTriggerMail(ctx.smtp, { environment: envLabel, baselineName, baselineSite: siteName, baselineFixletId: fixletId, groupName: gName, groupId: gId, groupSite: gSite, groupType: gType, actionId, emailTo: mailTo, emailFrom: mailFrom, emailCc: mailCc, emailBcc: mailBcc, SMTP_FROM, SMTP_TO, SMTP_CC, SMTP_BCC, csvContent, patchesCsvContent, baselinePatches }); 
+            console.log(`[Sandbox] Pre-patch mail triggered successfully for ${actionId}`);
+        } catch (e) { 
+            emailError = e.message || String(e); 
+            console.error(`[Sandbox] Pre-patch mail failed to send for ${actionId}:`, emailError);
+        }
+      } else if (shouldMail && !smtpReady) {
+          emailError = "SMTP not properly configured (Missing HOST or FROM)";
+          console.warn(`[Sandbox] Pre-patch mail skipped for ${actionId}:`, emailError);
       }
 
       return res.json({ ok: true, actionId, siteName, fixletId, group: gName, title: actionTitle, stage: envLabel, createdAt: new Date().toISOString(), preMail: shouldMail, preMailError: emailError });

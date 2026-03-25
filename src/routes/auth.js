@@ -7,9 +7,9 @@ const { sql, getPool } = require('../db/mssql');
 const { hashPassword, verifyPassword } = require('../utils/password');
 const { authenticateLDAP } = require('../services/ldap'); 
 const { encrypt, decrypt } = require('../utils/crypto'); 
-const { getCtx } = require('../env');
+const { getCtx, getCfg } = require('../env'); 
 const { joinUrl } = require('../utils/http');
-const { logger } = require('../services/logger'); // NEW IMPORT FOR LOGGING
+const { logger } = require('../services/logger');
 
 const HASH_ALGORITHM = 'PBKDF2';
 
@@ -24,8 +24,20 @@ function isAdmin(req) {
   if (!req.cookies.auth_session) return false;
   try {
     const session = JSON.parse(req.cookies.auth_session);
-    return session.role === 'Admin';
+    // Check permanent dbRole first, fallback to role, making it case-insensitive
+    const role = session.dbRole || session.role;
+    return role && role.toLowerCase() === 'admin';
   } catch { return false; }
+}
+
+function getCookieOptions() {
+    const timeoutMins = Number(getCfg().SESSION_TIMEOUT) || 15;
+    return {
+        maxAge: timeoutMins * 60 * 1000, // Converts minutes to milliseconds
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'lax'
+    };
 }
 
 function isValidLDAPUser(username) {
@@ -38,6 +50,8 @@ async function createBigFixOperator(username, isLdap, plainPassword = null, ldap
     const ctx = getCtx();
     const { BIGFIX_BASE_URL, BIGFIX_USER, BIGFIX_PASS, httpsAgent } = ctx.bigfix;
     
+    if (!BIGFIX_BASE_URL) return false;
+
     const postUrl = joinUrl(BIGFIX_BASE_URL, "/api/operators");
     let xml = "";
 
@@ -93,6 +107,9 @@ async function assignUserToRole(username, roleName) {
 
     const ctx = getCtx();
     const { BIGFIX_BASE_URL, BIGFIX_USER, BIGFIX_PASS, httpsAgent } = ctx.bigfix;
+    
+    if (!BIGFIX_BASE_URL) return false;
+
     const auth = { username: BIGFIX_USER, password: BIGFIX_PASS };
 
     try {
@@ -141,26 +158,24 @@ async function assignUserToRole(username, roleName) {
     return false;
 }
 
-// --- HELPER: LIVE CREDENTIAL VERIFICATION WITH DEEP LOGGING ---
 async function verifyBigFixCredentials(username, password) {
     const ctx = getCtx();
     const { BIGFIX_BASE_URL, httpsAgent } = ctx.bigfix;
+    
+    if (!BIGFIX_BASE_URL) {
+        logger.error(`[BigFix Auth] FAILED: BIGFIX_BASE_URL is not configured yet.`);
+        return false;
+    }
+
     try {
         logger.info(`[BigFix Auth] Verifying BigFix credentials for operator: '${username}'...`);
         const url = joinUrl(BIGFIX_BASE_URL, '/api/login');
-        const resp = await axios.get(url, { httpsAgent, auth: { username, password } });
-        
+        await axios.get(url, { httpsAgent, auth: { username, password } });
         logger.info(`[BigFix Auth] SUCCESS! Credentials accepted for '${username}'.`);
         return true; 
     } catch (e) { 
         const status = e.response ? e.response.status : 'Network Error';
         logger.error(`[BigFix Auth] FAILED for operator '${username}'. API returned Status: ${status}`);
-        
-        if (e.response && e.response.data) {
-            logger.error(`[BigFix Auth] Raw Error Response from BigFix: ${String(e.response.data).replace(/\n/g, '')}`);
-        } else {
-            logger.error(`[BigFix Auth] Network Error Message: ${e.message}`);
-        }
         return false; 
     }
 }
@@ -170,6 +185,9 @@ router.get('/api/auth/all-roles', async (req, res) => {
         if (!isAdmin(req)) return res.status(403).json({ ok: false, error: 'forbidden' });
         const ctx = getCtx();
         const { BIGFIX_BASE_URL, BIGFIX_USER, BIGFIX_PASS, httpsAgent } = ctx.bigfix;
+        
+        if (!BIGFIX_BASE_URL) return res.json({ ok: true, roles: [] });
+
         const auth = { username: BIGFIX_USER, password: BIGFIX_PASS };
         
         const rolesUrl = joinUrl(BIGFIX_BASE_URL, `/api/roles`);
@@ -195,6 +213,14 @@ router.get('/api/auth/roles', async (req, res) => {
     try {
         const ctx = getCtx();
         const { BIGFIX_BASE_URL, BIGFIX_USER, BIGFIX_PASS, httpsAgent } = ctx.bigfix;
+        
+        const actualRole = session.dbRole || session.role;
+        const isAdminUser = actualRole && actualRole.toLowerCase() === 'admin';
+
+        if (!BIGFIX_BASE_URL) {
+            return res.json({ ok: true, isMO: isAdminUser, roles: isAdminUser ? ['Admin'] : [] });
+        }
+
         const auth = { username: BIGFIX_USER, password: BIGFIX_PASS };
         
         let isMO = false;
@@ -220,6 +246,13 @@ router.get('/api/auth/roles', async (req, res) => {
                 if (match) roles.push(match[1].trim());
             }
         }
+
+        if (isAdminUser) {
+            roles = ['Admin']; 
+        } else {
+            roles = [...new Set(roles)]; 
+        }
+
         res.json({ ok: true, isMO, roles });
     } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
@@ -228,11 +261,17 @@ router.get('/api/auth/team-state', async (req, res) => {
     const session = getSessionData(req);
     if (!session) return res.status(401).json({ ok: false, error: 'Unauthorized' });
 
-    const activeRole = req.query.role || req.headers['x-user-role'] || session.role;
+    let activeRole = req.query.role || req.headers['x-user-role'] || session.role;
     if (!activeRole) return res.status(400).json({ ok: false, error: 'No active role provided' });
 
-    session.role = activeRole;
-    res.cookie('auth_session', JSON.stringify(session), { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax' });
+    const primaryRole = session.dbRole || session.role;
+    if (primaryRole && primaryRole.toLowerCase() === 'admin') {
+        session.role = 'Admin';
+        activeRole = 'Admin'; 
+    } else {
+        session.role = activeRole;
+    }
+    res.cookie('auth_session', JSON.stringify(session), getCookieOptions());
 
     try {
         const pool = await getPool();
@@ -252,11 +291,17 @@ router.post('/api/auth/team-state', async (req, res) => {
     const session = getSessionData(req);
     if (!session) return res.status(401).json({ ok: false, error: 'Unauthorized' });
 
-    const activeRole = req.query.role || req.headers['x-user-role'] || session.role;
+    let activeRole = req.query.role || req.headers['x-user-role'] || session.role;
     if (!activeRole) return res.status(400).json({ ok: false, error: 'No active role provided' });
 
-    session.role = activeRole;
-    res.cookie('auth_session', JSON.stringify(session), { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax' });
+    const primaryRole = session.dbRole || session.role;
+    if (primaryRole && primaryRole.toLowerCase() === 'admin') {
+        session.role = 'Admin';
+        activeRole = 'Admin';
+    } else {
+        session.role = activeRole;
+    }
+    res.cookie('auth_session', JSON.stringify(session), getCookieOptions());
 
     try {
         const stateStr = JSON.stringify(req.body);
@@ -274,6 +319,39 @@ function getSessionUserLocal(req) {
     if (!req.cookies || !req.cookies.auth_session) return null;
     try { return JSON.parse(req.cookies.auth_session).username; } catch { return null; }
 }
+
+router.post('/api/auth/reset-password', async (req, res) => {
+    try {
+        const { username, newPassword } = req.body;
+        if (!username || !newPassword) return res.status(400).json({ ok: false, error: 'bad_request', message: 'Username and new password required.' });
+
+        const pool = await getPool();
+        const rs = await pool.request()
+            .input('LoginName', sql.NVarChar(128), username)
+            .query('SELECT UserID, PasswordHash FROM dbo.USERS WHERE LoginName=@LoginName');
+        
+        const userRecord = rs.recordset[0];
+        if (!userRecord) return res.status(404).json({ ok: false, error: 'not_found', message: 'User account does not exist.' });
+        
+        if (userRecord.PasswordHash === 'LDAP_AUTH') {
+            return res.status(400).json({ ok: false, error: 'ldap_user', message: 'LDAP Active Directory users cannot reset passwords here. Please reset via Windows.' });
+        }
+
+        const hp = hashPassword(newPassword);
+        const encPass = encrypt(newPassword);
+
+        await pool.request()
+            .input('Hash', sql.NVarChar(128), hp.hash)
+            .input('Salt', sql.NVarChar(128), hp.salt)
+            .input('BfEnc', sql.NVarChar(sql.MAX), encPass)
+            .input('UID', sql.Int, userRecord.UserID)
+            .query('UPDATE dbo.USERS SET PasswordHash=@Hash, PasswordSalt=@Salt, BfPasswordEncrypted=@BfEnc, UpdatedAt=SYSUTCDATETIME() WHERE UserID=@UID');
+
+        res.json({ ok: true, message: 'Password reset successfully. You can now log in.' });
+    } catch (e) {
+        res.status(500).json({ ok: false, error: 'server_error', message: e.message });
+    }
+});
 
 router.post('/api/auth/change-password', async (req, res) => {
     const username = getSessionUserLocal(req);
@@ -312,8 +390,9 @@ router.get('/api/auth/my-bigfix-creds', async (req, res) => {
         if (rs.recordset.length > 0 && rs.recordset[0].BfPasswordEncrypted) {
             const decPass = decrypt(rs.recordset[0].BfPasswordEncrypted);
             if (decPass) {
-                const isValidInBigFix = await verifyBigFixCredentials(username, decPass);
-                return res.json({ ok: true, username, hasCreds: isValidInBigFix });
+                // 🚀 FIX: We completely disabled hitting BigFix on every page load here.
+                // If it decrypts cleanly from the DB, we trust the vault and say true.
+                return res.json({ ok: true, username, hasCreds: true });
             }
         }
         res.json({ ok: true, username, hasCreds: false });
@@ -328,6 +407,7 @@ router.post('/api/auth/my-bigfix-creds', async (req, res) => {
     if (!bfPassword) return res.status(400).json({ ok: false, error: 'Password required' });
 
     try {
+        // Here, it is completely fine to verify because they clicked the "Save" button.
         const isValid = await verifyBigFixCredentials(username, bfPassword);
         if (!isValid) {
             return res.status(401).json({ ok: false, error: 'BigFix API rejected the credentials. Check backend terminal logs for exact reason.' });
@@ -358,18 +438,61 @@ router.post('/api/auth/signup', async (req, res) => {
 
     const pool = await getPool();
     const adminCheck = await pool.request().query("SELECT COUNT(*) as Count FROM dbo.USERS WHERE Role = 'Admin'");
+    const isFirstSetup = adminCheck.recordset[0].Count === 0;
     
     let finalRole = 'Windows';
-    if (adminCheck.recordset[0].Count === 0) finalRole = 'Admin';
-    else {
-      if (!isAdmin(req)) return res.status(403).json({ ok: false, error: 'forbidden' });
-      finalRole = role || 'Windows';
+
+    if (isFirstSetup) {
+        const ctx = getCtx();
+        const { BIGFIX_BASE_URL, httpsAgent } = ctx.bigfix;
+        
+        try {
+            const loginUrl = joinUrl(BIGFIX_BASE_URL, '/api/login');
+            await axios.get(loginUrl, { httpsAgent, auth: { username, password } });
+
+            const opUrl = joinUrl(BIGFIX_BASE_URL, `/api/operator/${encodeURIComponent(username)}`);
+            const opResp = await axios.get(opUrl, { 
+                httpsAgent, 
+                auth: { username, password }, 
+                headers: { Accept: "application/xml" },
+                validateStatus: () => true
+            });
+
+            if (opResp.status === 403 || opResp.status === 401) {
+                return res.status(403).json({ ok: false, error: 'forbidden', message: 'The first user MUST be a Master Operator in BigFix. Your account does not have sufficient privileges.' });
+            }
+
+            if (opResp.status !== 200) throw new Error("Operator fetch failed.");
+
+            const xml = String(opResp.data || "");
+            const moMatch = xml.match(/<MasterOperator>(.*?)<\/MasterOperator>/i);
+            const isMO = moMatch && (moMatch[1].trim().toLowerCase() === "true" || moMatch[1].trim() === "1");
+
+            if (!isMO) {
+                return res.status(403).json({ ok: false, error: 'forbidden', message: 'The first user MUST be a Master Operator in BigFix.' });
+            }
+
+            const { saveEnvAndReload } = require('../env');
+            await saveEnvAndReload({
+                BIGFIX_USER: username,
+                BIGFIX_PASS: password
+            });
+
+            finalRole = 'Admin';
+            logger.info(`[Setup] First user '${username}' verified as MO and saved as Global System Account.`);
+
+        } catch (err) {
+            return res.status(401).json({ ok: false, error: 'invalid_credentials', message: 'Invalid BigFix credentials or unable to connect to BigFix.' });
+        }
+    } else {
+        if (!isAdmin(req)) return res.status(403).json({ ok: false, error: 'forbidden' });
+        finalRole = role || 'Windows';
     }
     
     const exists = await pool.request().input('LoginName', sql.NVarChar(128), username).query('SELECT 1 FROM dbo.USERS WHERE LoginName=@LoginName');
     if (exists.recordset.length) return res.status(409).json({ ok:false, error:'user_exists' });
 
-    if (createBfOp) await createBigFixOperator(username, false, password, null, true);
+    if (createBfOp && !isFirstSetup) await createBigFixOperator(username, false, password, null, true);
 
     const gapRes = await pool.request().query(`SELECT MIN(t1.UserID + 1) AS NextID FROM dbo.USERS t1 LEFT JOIN dbo.USERS t2 ON t1.UserID + 1 = t2.UserID WHERE t2.UserID IS NULL AND t1.UserID < 9000`);
     let nextId = gapRes.recordset[0].NextID;
@@ -437,19 +560,42 @@ router.post('/api/auth/login', async (req, res) => {
         const encPass = encrypt(password);
         if (encPass) await pool.request().input('Bf', sql.NVarChar(sql.MAX), encPass).input('UID', sql.Int, userRecord.UserID).query('UPDATE dbo.USERS SET BfPasswordEncrypted = @Bf WHERE UserID = @UID');
     } 
-    else if (!isLdapOk && !userRecord.BfPasswordEncrypted && userRecord.PasswordHash !== 'LDAP_AUTH') {
-        const encPass = encrypt(password);
-        if (encPass) await pool.request().input('Bf', sql.NVarChar(sql.MAX), encPass).input('UID', sql.Int, userRecord.UserID).query('UPDATE dbo.USERS SET BfPasswordEncrypted = @Bf WHERE UserID = @UID');
-    }
 
     if (userRecord && userRecord.Role && userRecord.Role !== 'Admin') {
         await assignUserToRole(username, userRecord.Role);
     }
 
-    const sessionData = { userId: userRecord.UserID, username: userRecord.LoginName, role: userRecord.Role };
-    res.cookie('auth_session', JSON.stringify(sessionData), { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax' });
-    res.json({ ok:true, userId: userRecord.UserID, username: userRecord.LoginName, role: userRecord.Role });
+    const sessionData = { 
+        userId: userRecord.UserID, 
+        username: userRecord.LoginName, 
+        role: userRecord.Role,
+        dbRole: userRecord.Role 
+    };
+    
+    const timeoutMins = Number(getCfg().SESSION_TIMEOUT) || 15;
+    
+    res.cookie('auth_session', JSON.stringify(sessionData), getCookieOptions());
+    res.json({ ok:true, userId: userRecord.UserID, username: userRecord.LoginName, role: userRecord.Role, timeoutMins });
   } catch (e) { res.status(500).json({ ok:false, error:'server_error', message: e.message }); }
+});
+
+router.post('/api/auth/logout', (req, res) => {
+  res.clearCookie('auth_session', { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax' });
+  res.json({ ok: true, message: 'Logged out' });
+});
+
+router.get('/api/auth/status', (req, res) => {
+  const timeoutMins = Number(getCfg().SESSION_TIMEOUT) || 15;
+
+  if (req.cookies?.auth_session) {
+    try {
+      const sessionData = JSON.parse(req.cookies.auth_session);
+      if (sessionData.userId && sessionData.username) {
+          return res.json({ ok: true, authed: true, userData: sessionData, timeoutMins });
+      }
+    } catch (e) { return res.json({ ok: false, authed: false, timeoutMins }); }
+  }
+  return res.json({ ok: false, authed: false, timeoutMins });
 });
 
 router.post('/api/auth/admin/add-user', async (req, res) => {
@@ -514,21 +660,6 @@ router.post('/api/auth/admin/add-user', async (req, res) => {
     } catch (e) { res.status(500).json({ ok: false, error: 'server_error', message: e.message }); }
 });
 
-router.post('/api/auth/logout', (req, res) => {
-  res.clearCookie('auth_session', { httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax' });
-  res.json({ ok: true, message: 'Logged out' });
-});
-
-router.get('/api/auth/status', (req, res) => {
-  if (req.cookies?.auth_session) {
-    try {
-      const sessionData = JSON.parse(req.cookies.auth_session);
-      if (sessionData.userId && sessionData.username) return res.json({ ok: true, authed: true, userData: sessionData });
-    } catch (e) { return res.json({ ok: false, authed: false }); }
-  }
-  return res.json({ ok: false, authed: false });
-});
-
 router.get('/api/auth/users', async (req, res) => {
   try {
     if (!isAdmin(req)) return res.status(403).json({ ok: false, error: 'forbidden' });
@@ -542,7 +673,7 @@ router.delete('/api/auth/users/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const { currentUserId } = req.body;
-    if (!isAdmin(req)) return res.status(403).json({ ok: false, error: 'forbidden' });
+    if (!isAdmin(req)) return res.status(403).json({ ok: false, error: 'forbidden 404' });
     if ([9002, 9003, 9004].includes(Number(id))) return res.status(403).json({ ok: false, error: 'forbidden' });
     if (Number(id) === Number(currentUserId)) return res.status(403).json({ ok: false, error: 'cannot_delete_self' });
     const pool = await getPool();
