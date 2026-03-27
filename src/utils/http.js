@@ -9,7 +9,7 @@ function joinUrl(base, path) {
 function toLowerSafe(x) { return String(x || "").toLowerCase(); }
 
 function splitEmails(s) {
-  return String(s || "").split(/[;,]/).map(v => v.trim()).filter(Boolean); 
+  return String(s || "").split(/[;,]/).map(v => v.trim()).filter(Boolean);
 }
 
 function escapeHtml(s) {
@@ -44,9 +44,7 @@ function getSessionRole(req) {
 
 async function getBfAuthContext(req, ctx) {
     const { BIGFIX_USER, BIGFIX_PASS, httpsAgent } = ctx.bigfix;
-    
-    // Background processes (like watcher/scheduler) that don't have a 'req' 
-    // will continue to use the system root account from .env
+
     if (!req) {
         return { httpsAgent, auth: { username: BIGFIX_USER, password: BIGFIX_PASS } };
     }
@@ -61,10 +59,6 @@ async function getBfAuthContext(req, ctx) {
 
     if (!requestUser) throw new Error("401_UNAUTHORIZED: No active user session found.");
 
-    // 🚀 THE MAGIC BYPASS HAS BEEN REMOVED!
-    // Now ALL users (including Master Operators) MUST have valid credentials 
-    // stored in the database vault, otherwise they will get a 401 error.
-
     let finalUser = null;
     let finalPass = null;
 
@@ -73,20 +67,23 @@ async function getBfAuthContext(req, ctx) {
         const rs = await pool.request()
             .input('LoginName', sql.NVarChar(128), requestUser)
             .query('SELECT BfPasswordEncrypted FROM dbo.USERS WHERE LoginName = @LoginName');
-            
+
         if (rs.recordset.length > 0 && rs.recordset[0].BfPasswordEncrypted) {
             const decrypted = decrypt(rs.recordset[0].BfPasswordEncrypted);
             if (decrypted) {
                 finalUser = requestUser;
                 finalPass = decrypted;
+            } else {
+                throw new Error("401_UNAUTHORIZED: Unable to decrypt your stored BigFix credentials. Please re‑enter them in the vault.");
             }
         }
     } catch (e) {
         console.error("[Auth Context] Failed to resolve DB credentials:", e.message);
+        throw e; // Re-throw the same error so the caller knows it's a 401
     }
 
     if (!finalUser || !finalPass) {
-         throw new Error("401_UNAUTHORIZED: Missing personal BigFix API Credentials.");
+        throw new Error("401_UNAUTHORIZED: Missing personal BigFix API Credentials.");
     }
 
     return { httpsAgent, auth: { username: finalUser, password: finalPass } };

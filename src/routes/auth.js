@@ -385,18 +385,21 @@ router.get('/api/auth/my-bigfix-creds', async (req, res) => {
 
     try {
         const pool = await getPool();
-        const rs = await pool.request().input('LoginName', sql.NVarChar(128), username).query('SELECT BfPasswordEncrypted FROM dbo.USERS WHERE LoginName = @LoginName');
-            
+        const rs = await pool.request()
+            .input('LoginName', sql.NVarChar(128), username)
+            .query('SELECT BfPasswordEncrypted FROM dbo.USERS WHERE LoginName = @LoginName');
+
         if (rs.recordset.length > 0 && rs.recordset[0].BfPasswordEncrypted) {
             const decPass = decrypt(rs.recordset[0].BfPasswordEncrypted);
             if (decPass) {
-                // 🚀 FIX: We completely disabled hitting BigFix on every page load here.
-                // If it decrypts cleanly from the DB, we trust the vault and say true.
+                // We don't actually need the password, just that it decrypts
                 return res.json({ ok: true, username, hasCreds: true });
             }
         }
         res.json({ ok: true, username, hasCreds: false });
-    } catch (e) { res.status(500).json({ ok: false, error: 'db_error', message: e.message }); }
+    } catch (e) {
+        res.status(500).json({ ok: false, error: 'db_error', message: e.message });
+    }
 });
 
 router.post('/api/auth/my-bigfix-creds', async (req, res) => {
@@ -407,20 +410,34 @@ router.post('/api/auth/my-bigfix-creds', async (req, res) => {
     if (!bfPassword) return res.status(400).json({ ok: false, error: 'Password required' });
 
     try {
-        // Here, it is completely fine to verify because they clicked the "Save" button.
+        // Verify credentials against BigFix
         const isValid = await verifyBigFixCredentials(username, bfPassword);
         if (!isValid) {
             return res.status(401).json({ ok: false, error: 'BigFix API rejected the credentials. Check backend terminal logs for exact reason.' });
         }
 
-        const pool = await getPool();
-        const encryptedPass = encrypt(bfPassword); 
+        // Encrypt and verify
+        const encryptedPass = encrypt(bfPassword);
+        if (!encryptedPass) {
+            return res.status(500).json({ ok: false, error: 'Encryption failed' });
+        }
 
-        await pool.request().input('LoginName', sql.NVarChar(128), username).input('BfEncrypted', sql.NVarChar(sql.MAX), encryptedPass)
+        const testDecrypt = decrypt(encryptedPass);
+        if (testDecrypt !== bfPassword) {
+            console.error(`[Auth] Encryption verification failed for user ${username}`);
+            return res.status(500).json({ ok: false, error: 'Encryption verification failed' });
+        }
+
+        const pool = await getPool();
+        await pool.request()
+            .input('LoginName', sql.NVarChar(128), username)
+            .input('BfEncrypted', sql.NVarChar(sql.MAX), encryptedPass)
             .query('UPDATE dbo.USERS SET BfPasswordEncrypted = @BfEncrypted, UpdatedAt = SYSUTCDATETIME() WHERE LoginName = @LoginName');
 
         res.json({ ok: true, message: 'Personal BigFix credentials verified and saved successfully.' });
-    } catch (e) { res.status(500).json({ ok: false, error: 'db_error', message: e.message }); }
+    } catch (e) {
+        res.status(500).json({ ok: false, error: 'db_error', message: e.message });
+    }
 });
 
 router.get('/api/auth/setup-required', async (req, res) => {

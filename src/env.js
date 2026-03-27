@@ -1,9 +1,8 @@
-// src/env.js
 const fs = require("fs");
 const path = require("path");
 const https = require("https");
 const os = require("os");
-const crypto = require("crypto"); 
+const crypto = require("crypto");
 
 function projectRoot() { return process.cwd(); }
 function envPath() { return path.resolve(projectRoot(), ".env"); }
@@ -40,7 +39,6 @@ function toEnvContent(dict, order = []) {
   return lines.join(os.EOL);
 }
 
-/* ---------------- keys we persist to .env ---------------- */
 const UI_KEYS = new Set([
   "SESSION_TIMEOUT",
   "PORT",
@@ -69,7 +67,6 @@ function writeEnvFull(fullDict) {
   return { path: p };
 }
 
-/* ---------------- runtime cfg + ctx ---------------- */
 const SECRET_KEYS = new Set([
   "BIGFIX_PASS", "SANDBOX_BIGFIX_PASS", "PILOT_BIGFIX_PASS", "PRODUCTION_BIGFIX_PASS",
   "SN_PASSWORD", "SMTP_PASSWORD", "VCENTER_PASSWORD", "PRISM_PASS",
@@ -95,6 +92,7 @@ function loadFromFileDict() {
   return dict;
 }
 
+/*
 function ensureEncryptionKey() {
   const dict = loadFromFileDict();
   if (!dict.ENCRYPTION_KEY) {
@@ -107,7 +105,15 @@ function ensureEncryptionKey() {
   }
 }
 
-ensureEncryptionKey();
+ensureEncryptionKey(); */
+
+// Force crypto to log key fingerprint (optional)
+setTimeout(() => {
+    try {
+        const { getMasterKey } = require('./utils/crypto');
+        getMasterKey(); // just to trigger fingerprint log
+    } catch (err) {}
+}, 100);
 
 function computeMissing(dict) {
   const miss = [];
@@ -132,13 +138,11 @@ function getStageConfig(dictRaw, stage) {
 }
 
 function buildCfg(dictRaw, dbOverrides = {}) {
-  // 1. Decode base64 secrets from the file FIRST
   const decodedFile = { ...dictRaw };
   for (const k of SECRET_KEYS) {
       if (k in decodedFile) decodedFile[k] = b64d(decodedFile[k]);
   }
 
-  // 2. Merge with securely decrypted DB Overrides
   const merged = { ...decodedFile, ...dbOverrides };
 
   const defaultFrontEnd = path.resolve(projectRoot(), 'frontend_dist');
@@ -236,15 +240,12 @@ function buildCfg(dictRaw, dbOverrides = {}) {
     },
     servicenow: { SN_URL: cfg.SN_URL, SN_USER: cfg.SN_USER, SN_PASSWORD: cfg.SN_PASSWORD, SN_ALLOW_SELF_SIGNED: cfg.SN_ALLOW_SELF_SIGNED },
     prism: { PRISM_BASE_URL: cfg.PRISM_BASE_URL, PRISM_USER: cfg.PRISM_USER, PRISM_PASS: cfg.PRISM_PASS },
-    
-    // 🚀 FIX: Ensuring Context VCenter perfectly mirrors merged DB Configuration
-    vcenter: { 
-        VCENTER_URL: cfg.VCENTER_URL, 
-        VCENTER_USER: cfg.VCENTER_USER, 
-        VCENTER_PASSWORD: cfg.VCENTER_PASSWORD, 
-        VCENTER_ALLOW_SELF_SIGNED: cfg.VCENTER_ALLOW_SELF_SIGNED 
+    vcenter: {
+        VCENTER_URL: cfg.VCENTER_URL,
+        VCENTER_USER: cfg.VCENTER_USER,
+        VCENTER_PASSWORD: cfg.VCENTER_PASSWORD,
+        VCENTER_ALLOW_SELF_SIGNED: cfg.VCENTER_ALLOW_SELF_SIGNED
     },
-    
     ldap: { LDAP_ENABLED: cfg.LDAP_ENABLED, LDAP_URL: cfg.LDAP_URL, LDAP_DOMAIN: cfg.LDAP_DOMAIN, LDAP_ALLOW_SELF_SIGNED: cfg.LDAP_ALLOW_SELF_SIGNED },
     smtp: { SMTP_HOST: cfg.SMTP_HOST, SMTP_PORT: cfg.SMTP_PORT, SMTP_SECURE: cfg.SMTP_SECURE, SMTP_FROM: cfg.SMTP_FROM, SMTP_TO: cfg.SMTP_TO, SMTP_CC: cfg.SMTP_CC, SMTP_BCC: cfg.SMTP_BCC, SMTP_USER: cfg.SMTP_USER, SMTP_PASSWORD: cfg.SMTP_PASSWORD, SMTP_ALLOW_SELF_SIGNED: cfg.SMTP_ALLOW_SELF_SIGNED },
     DEBUG_LOG: cfg.DEBUG_LOG,
@@ -288,20 +289,28 @@ let dbOverrides = {};
 async function loadDbConfig() {
   const { getPool } = require('./db/mssql');
   const { decrypt } = require('./utils/crypto');
-  
+
   try {
       const pool = await getPool();
       const result = await pool.request().query('SELECT ConfigKey, ConfigValue FROM dbo.AppConfiguration');
-      
+
       dbOverrides = {};
       for (const row of result.recordset) {
          const key = row.ConfigKey;
          let val = row.ConfigValue;
-         
-         if (SECRET_KEYS.has(key)) val = decrypt(val) || val;
+
+         if (SECRET_KEYS.has(key)) {
+             const decrypted = decrypt(val);
+             if (decrypted !== null) {
+                 val = decrypted;
+             } else {
+                 console.error(`⚠️ Failed to decrypt ${key}. Please re-enter this secret via the UI.`);
+                 val = '';
+             }
+         }
          dbOverrides[key] = val;
       }
-      
+
       CURRENT = buildCfg(loadFromFileDict(), dbOverrides);
       console.log("✅ Secure configuration successfully loaded from Database.");
   } catch (err) {

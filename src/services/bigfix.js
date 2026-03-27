@@ -106,7 +106,7 @@ const bigfixClient = (req, ctx) => {
     const relevance = `((name of it | "N/A"), (if (exists values of results (it, bes properties "IP Address")) then (concatenation ", " of values of results (it, bes properties "IP Address")) else "N/A"), (operating system of it | "Unknown")) of members  whose (value of result (it, bes property "Device Type") as lowercase = "server") of bes computer group whose (name of it = "${groupName}")`;
     try {
       // 🚀 CRITICAL FIX: Use Master Creds for fetching base data, RBAC filters it via Node cache later.
-      const bfAuthOpts = await getBfAuthContext(null, ctx); 
+      const bfAuthOpts = await getBfAuthContext(req, ctx);
       const res = await axios.get(`${BIGFIX_BASE_URL}/api/query`, { ...bfAuthOpts, params: { output: "json", relevance } });
       const result = res.data?.result;
       const rows = Array.isArray(result) ? result : (result ? [result] : []);

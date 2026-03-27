@@ -10,6 +10,7 @@ const CACHE_TTL = 5 * 60 * 1000;
 let globalComputersCache = { data: [], lastFetch: 0 };
 let roleSitesCache = {};
 let propertiesCache = { data: [], lastFetch: 0 };
+let manageGroupsCache = {};
 
 async function getGroupLocation(req, ctx, groupId) {
     const bfAuthOpts = await getBfAuthContext(req, ctx);
@@ -99,10 +100,13 @@ function attachGroupRoutes(app, ctx) {
             else siteFilter = ` whose (name of site of it as lowercase = "actionsite" or name of site of it as lowercase = "master action site")`;
         }
 
-        const relevance = `(id of it as string & "||" & name of it) of bes computer groups${siteFilter}`;
+        // const relevance = `(id of it as string & "||" & name of it) of bes computer groups${siteFilter}`;
+
+        // 🚀 Added 'number of members' to the relevance query
+            const relevance = `(id of it as string & "||" & name of it & "||" & (number of members of it as string | "0")) of bes computer groups${siteFilter}`;
         
         // CRITICAL FIX: Safe read using Master Creds since RBAC is handled above via siteFilter
-        const bfAuthOpts = await getBfAuthContext(null, ctx); 
+        const bfAuthOpts = await getBfAuthContext(req, ctx); 
         const url = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(relevance)}`;
         
         log(req, `[Groups] Fetching group list...`);
@@ -113,7 +117,7 @@ function attachGroupRoutes(app, ctx) {
             const raw = Array.isArray(resp.data.result) ? resp.data.result : [resp.data.result];
             groups = raw.map(r => {
                 const parts = String(r).split("||");
-                return { id: parts[0], name: parts[1] };
+                return { id: parts[0], name: parts[1], count: parts[2] };
             });
         }
         groups.sort((a,b) => a.name.localeCompare(b.name));
@@ -357,6 +361,58 @@ function attachGroupRoutes(app, ctx) {
         res.json({ ok: true, properties: propertiesCache.data });
       } catch (e) { res.status(500).json({ok:false, error:e.message}); }
   });
+
+
+
+app.get("/api/groups/manage", async (req, res) => {
+    req._logStart = Date.now();
+    try {
+        const activeRole = req.headers['x-user-role'] || getSessionRole(req);
+        const activeUser = getSessionUser(req);
+        const isMO = await isMasterOperator(req, ctx, activeUser);
+        const forceRefresh = req.query.refresh === 'true';
+
+        // 🚀 1. CACHE CHECK: Serve instantly if we fetched within the last 5 minutes
+        const cacheKey = `${activeUser}_${activeRole}`;
+        const now = Date.now();
+        if (!forceRefresh && manageGroupsCache[cacheKey] && (now - manageGroupsCache[cacheKey].lastFetch < 5 * 60 * 1000)) {
+            log(req, `[Groups] Serving Manage Groups from cache for ${activeUser}`);
+            return res.json({ ok: true, groups: manageGroupsCache[cacheKey].data });
+        }
+
+        // Role-Based Filtering Logic
+        let siteFilter = "";
+        if (!isMO && activeRole && activeRole !== "Admin" && activeRole !== "No Role Assigned") {
+            const roleAssets = await getRoleAssets(req, ctx, activeRole);
+            const allowedSites = [...(roleAssets.customSites || []), ...(roleAssets.externalSites || [])].map(s => `"${s.toLowerCase()}"`).join("; ");
+            if (allowedSites) siteFilter = ` whose (name of site of it as lowercase is contained by set of (${allowedSites}) or name of site of it as lowercase = "actionsite" or name of site of it as lowercase = "master action site")`;
+            else siteFilter = ` whose (name of site of it as lowercase = "actionsite" or name of site of it as lowercase = "master action site")`;
+        }
+
+        const relevance = `((id of it as string | "N/A") & "||" & (name of it as string | "N/A") & "||" & (if automatic flag of it then "Automatic" else if manual flag of it then "Manual" else "Server Based") & "||" & (name of site of it as string | "N/A") & "||" & (number of members of it as string | "0")) of bes computer groups${siteFilter}`;
+        
+        const bfAuthOpts = await getBfAuthContext(req, ctx);
+        const url = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(relevance)}`;
+        
+        log(req, `[Groups] Fetching extended group list from BigFix API...`);
+        const resp = await axios.get(url, { ...bfAuthOpts, headers: { Accept: "application/json" } });
+        
+        let groups = [];
+        if (resp.status === 200 && resp.data?.result) {
+            const raw = Array.isArray(resp.data.result) ? resp.data.result : [resp.data.result];
+            groups = raw.map(r => {
+                const parts = String(r).split("||");
+                return { id: parts[0], name: parts[1], type: parts[2], site: parts[3], count: parts[4] };
+            });
+        }
+
+        // 🚀 2. SAVE TO CACHE
+        manageGroupsCache[cacheKey] = { data: groups, lastFetch: now };
+
+        res.json({ ok: true, groups });
+    } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
+  });
+
 }
 
 module.exports = { attachGroupRoutes };

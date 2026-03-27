@@ -50,8 +50,21 @@ function buildApp() {
     },
   };
 
+  // const morganFormat = ':method :url :status :res[content-length] - :response-time ms';
+  // app.use(morgan(morganFormat, { stream: morganStream }));
   const morganFormat = ':method :url :status :res[content-length] - :response-time ms';
-  app.use(morgan(morganFormat, { stream: morganStream }));
+  app.use(morgan(morganFormat, { 
+      stream: morganStream,
+      // 🚀 FIX: Tell Morgan to skip logging for these noisy dashboard endpoints
+      skip: (req, res) => {
+          const url = req.originalUrl || req.url;
+          return url.includes("/status") || 
+                 url.includes("/results") || 
+                 url.includes("/last") ||
+                 url.includes("/health/") ||
+                 url.includes("/infra/");
+      }
+  }));
 
   app.use(express.json({ limit: "1mb" }));
   app.use(cookieParser());
