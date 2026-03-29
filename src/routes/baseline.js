@@ -83,7 +83,7 @@ function attachBaselineRoutes(app, ctx) {
         }
 
         // 🚀 FIX: Fetching Component IDs directly inside the Baseline Query for 100% accurate Dashboard Counts
-        const relevance = `(id of it as string & "||" & name of it & "||" & (if (name of site of it as lowercase = "actionsite" or name of site of it as lowercase = "master action site") then "master" else if (custom site flag of site of it) then "custom" else "external") & "||" & (if (custom site flag of site of it) then (if (name of site of it as lowercase starts with "customsite_") then (substring (11, length of name of site of it) of name of site of it) else name of site of it) else name of site of it) & "||" & (concatenation ";" of (ids of source fixlets of components of component groups of it as string) | "") & "||" & (applicable computer count of it as string | "0")) of bes baselines${siteFilter}`;
+        const relevance = `(id of it as string & "||" & name of it & "||" & (if (name of site of it as lowercase = "actionsite" or name of site of it as lowercase = "master action site") then "master" else if (custom site flag of site of it) then "custom" else "external") & "||" & (if (custom site flag of site of it) then (if (name of site of it as lowercase starts with "customsite_") then (substring (11, length of name of site of it) of name of site of it) else name of site of it) else name of site of it) & "||" & (concatenation ";" of (ids of source fixlets of components of component groups of it as string) | "") & "||" & (applicable computer count of it as string | "0") & "||" &  (number of components of component groups of it as string | "0")) of bes baselines${siteFilter}`;
         
         const bfAuthOpts = await getBfAuthContext(req, ctx);
         const url = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(relevance)}`;
@@ -106,7 +106,8 @@ function attachBaselineRoutes(app, ctx) {
                     siteName: parts[3],
                     patches: patches,
                     patch_count: patches.length,
-                    computer_count: parseInt(parts[5] || "0", 10) 
+                    computer_count: parseInt(parts[5] || "0", 10),
+                    component_count: parseInt(parts[6] || "0", 10)
                 };
             });
         }

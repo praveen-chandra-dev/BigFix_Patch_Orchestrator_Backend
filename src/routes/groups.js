@@ -413,6 +413,63 @@ app.get("/api/groups/manage", async (req, res) => {
     } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   });
 
+app.get("/api/groups/computers-extended", async (req, res) => {
+      try {
+          const activeRole = req.headers['x-user-role'] || getSessionRole(req);
+          const activeUser = getSessionUser(req);
+          const groupId = req.query.groupId; // Optional: To fetch for a specific group
+
+          const isMO = await isMasterOperator(req, ctx, activeUser);
+
+          // 1. Determine Target (All computers OR specific group)
+          let target = "bes computers";
+          if (groupId) {
+              target = `members of bes computer groups whose (id of it as string = "${escapeXML(groupId)}")`;
+          }
+
+          // 2. Apply RBAC Constraints
+          let compFilter = "";
+          if (!isMO && activeRole && activeRole !== "Admin" && activeRole !== "No Role Assigned") {
+              const roleAssets = await getRoleAssets(req, ctx, activeRole);
+              if (roleAssets.found && roleAssets.compNames.length > 0) {
+                  const names = roleAssets.compNames.map(n => `"${n.toLowerCase()}"`).join(";");
+                  compFilter = ` whose (name of it as lowercase is contained by set of (${names}))`;
+              } else {
+                  return res.json({ ok: true, computers: [] }); // User has no computers assigned
+              }
+          }
+
+          const combinedTarget = groupId ? `(${target})${compFilter}` : `bes computers${compFilter}`;
+
+          // 3. Your Specific Relevance Query
+          const properties = `(if exists values of results (it, bes property "Computer Name") then concatenation ";" of values of results (it, bes property "Computer Name") else "N/A") & " | " & (if exists values of results (it, bes property "OS") then concatenation ";" of values of results (it, bes property "OS") else "N/A") & " | " & (if exists values of results (it, bes property "Last Report Time") then concatenation ";" of values of results (it, bes property "Last Report Time") else "N/A") & " | " & (if exists values of results (it, bes property "Locked") then concatenation ";" of values of results (it, bes property "Locked") else "N/A") & " | " & (if exists values of results (it, bes property "Relay") then concatenation ";" of values of results (it, bes property "Relay") else "N/A") & " | " & (if exists values of results (it, bes property "DNS Name") then concatenation ";" of values of results (it, bes property "DNS Name") else "N/A") & " | " & (if exists values of results (it, bes property "IP Address") then concatenation ";" of values of results (it, bes property "IP Address") else "N/A") & " | " & (if exists values of results (it, bes property "BES Root Server") then concatenation ";" of values of results (it, bes property "BES Root Server") else "N/A") & " | " & (if exists values of results (it, bes property "Agent Type") then concatenation ";" of values of results (it, bes property "Agent Type") else "N/A") & " | " & (if exists values of results (it, bes property "Device Type") then concatenation ";" of values of results (it, bes property "Device Type") else "N/A") & " | " & (if exists values of results (it, bes property "Agent Version") then concatenation ";" of values of results (it, bes property "Agent Version") else "N/A") & " | " & (if exists values of results (it, bes property "OS Version") then concatenation ";" of values of results (it, bes property "OS Version") else "N/A")`;
+          
+          const finalRelevance = `((id of it as string | "0") & " | " & ${properties}) of ${combinedTarget}`;
+          
+          const bfAuthOpts = await getBfAuthContext(null, ctx); // Run as master since RBAC is handled above
+          const url = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(finalRelevance)}`;
+          
+          const resp = await axios.get(url, { ...bfAuthOpts, headers: { Accept: "application/json" } });
+          
+          let computers = [];
+          if (resp.status === 200 && resp.data?.result) {
+              const result = resp.data.result;
+              const raw = Array.isArray(result) ? result : (result ? [result] : []);
+              
+              computers = raw.map(r => {
+                  const p = String(r).split(" | ");
+                  return {
+                      id: p[0], name: p[1], os: p[2], lastReport: p[3], locked: p[4],
+                      relay: p[5], dns: p[6], ip: p[7], rootServer: p[8],
+                      agentType: p[9], deviceType: p[10], agentVersion: p[11], osVersion: p[12]
+                  };
+              });
+          }
+
+          res.json({ ok: true, computers });
+      } catch (e) { res.status(500).json({ok:false, error:e.message}); }
+  });
+
 }
 
 module.exports = { attachGroupRoutes };

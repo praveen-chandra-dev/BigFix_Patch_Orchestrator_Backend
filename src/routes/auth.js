@@ -158,6 +158,62 @@ async function assignUserToRole(username, roleName) {
     return false;
 }
 
+async function unassignUserFromRole(username, roleName) {
+    if (!roleName || roleName === 'Admin') return true;
+
+    const ctx = getCtx();
+    const { BIGFIX_BASE_URL, BIGFIX_USER, BIGFIX_PASS, httpsAgent } = ctx.bigfix;
+    if (!BIGFIX_BASE_URL) return false;
+
+    const auth = { username: BIGFIX_USER, password: BIGFIX_PASS };
+
+    try {
+        const rolesUrl = joinUrl(BIGFIX_BASE_URL, `/api/roles`);
+        const rolesResp = await axios.get(rolesUrl, { httpsAgent, auth, headers: { Accept: "application/xml" }, validateStatus: () => true });
+        
+        let roleId = null;
+        if (rolesResp.status === 200) {
+            const xmlData = String(rolesResp.data || "");
+            const roleBlocks = xmlData.split("</Role>");
+            for (const block of roleBlocks) {
+                if (block.includes(`<Name>${roleName}</Name>`) || block.includes(`>${roleName}<`)) {
+                    const idMatch = block.match(/<ID>(\d+)<\/ID>/i);
+                    if (idMatch) { roleId = idMatch[1]; break; }
+                }
+            }
+        }
+
+        if (!roleId) return false;
+
+        const roleUrl = joinUrl(BIGFIX_BASE_URL, `/api/role/${roleId}`);
+        const roleResp = await axios.get(roleUrl, { httpsAgent, auth, headers: { Accept: "application/xml" }, validateStatus: () => true });
+
+        if (roleResp.status === 200) {
+            let roleXml = String(roleResp.data);
+            
+            // SAFER REGEX: Matches `<Explicit>username</Explicit>` ignoring all surrounding whitespace/newlines
+            const explicitRegex = new RegExp(`<Explicit>\\s*${username}\\s*</Explicit>`, 'gi');
+            
+            if (!explicitRegex.test(roleXml)) {
+                return true; // User is already not in this role
+            }
+
+            // Remove the user
+            roleXml = roleXml.replace(explicitRegex, '');
+            
+            // Clean up empty operator blocks (removes <Operators></Operators> if nothing is left inside)
+            roleXml = roleXml.replace(/<Operators>\s*<\/Operators>/g, '<Operators/>');
+
+            await axios.put(roleUrl, roleXml, { httpsAgent, auth, headers: { "Content-Type": "application/xml" } });
+            return true;
+        }
+    } catch (err) {
+        logger.warn(`[RBAC] Failed to unassign user from old role in BigFix: ${err.message}`);
+        return false;
+    }
+    return false;
+}
+
 async function verifyBigFixCredentials(username, password) {
     const ctx = getCtx();
     const { BIGFIX_BASE_URL, httpsAgent } = ctx.bigfix;
@@ -677,12 +733,54 @@ router.post('/api/auth/admin/add-user', async (req, res) => {
     } catch (e) { res.status(500).json({ ok: false, error: 'server_error', message: e.message }); }
 });
 
+// router.get('/api/auth/users', async (req, res) => {
+//   try {
+//     if (!isAdmin(req)) return res.status(403).json({ ok: false, error: 'forbidden' });
+//     const pool = await getPool();
+//     const rs = await pool.request().query('SELECT UserID, LoginName, Role, CreatedAt FROM dbo.USERS ORDER BY LoginName');
+//     res.json({ ok: true, users: rs.recordset });
+//   } catch (e) { res.status(500).json({ ok:false, error: e.message }); }
+// });
+
 router.get('/api/auth/users', async (req, res) => {
   try {
     if (!isAdmin(req)) return res.status(403).json({ ok: false, error: 'forbidden' });
+    
     const pool = await getPool();
     const rs = await pool.request().query('SELECT UserID, LoginName, Role, CreatedAt FROM dbo.USERS ORDER BY LoginName');
-    res.json({ ok: true, users: rs.recordset });
+    let users = rs.recordset;
+
+    // Fetch live roles directly from BigFix for every user
+    const ctx = getCtx();
+    const { BIGFIX_BASE_URL, BIGFIX_USER, BIGFIX_PASS, httpsAgent } = ctx.bigfix;
+
+    if (BIGFIX_BASE_URL) {
+        const auth = { username: BIGFIX_USER, password: BIGFIX_PASS };
+        
+        // Use Promise.all to fetch them all simultaneously for speed
+        await Promise.all(users.map(async (u) => {
+            if (u.Role === 'Admin') return; // Skip the main admin
+            try {
+                const rolesUrl = joinUrl(BIGFIX_BASE_URL, `/api/operator/${encodeURIComponent(u.LoginName)}/roles`);
+                const rolesResp = await axios.get(rolesUrl, { httpsAgent, auth, headers: { Accept: "application/xml" }, validateStatus: () => true });
+
+                if (rolesResp.status === 200) {
+                    const xml = String(rolesResp.data || "");
+                    const roleBlocks = xml.split("</Role>");
+                    let bfRoles = [];
+                    for (const block of roleBlocks) {
+                        const match = block.match(/<Name>(.*?)<\/Name>/i);
+                        if (match) bfRoles.push(match[1].trim());
+                    }
+                    u.Role = bfRoles.length > 0 ? bfRoles.join(', ') : 'No Role Assigned';
+                }
+            } catch (err) {
+                logger.warn(`Failed to fetch roles for ${u.LoginName}: ${err.message}`);
+            }
+        }));
+    }
+
+    res.json({ ok: true, users });
   } catch (e) { res.status(500).json({ ok:false, error: e.message }); }
 });
 
@@ -697,6 +795,93 @@ router.delete('/api/auth/users/:id', async (req, res) => {
     await pool.request().input('UserID', sql.Int, id).query('DELETE FROM dbo.USERS WHERE UserID = @UserID');
     res.json({ ok: true, deleted: true });
   } catch (e) { res.status(500).json({ ok:false, error: e.message }); }
+});
+
+router.put('/api/auth/users/:id/role', async (req, res) => {
+  try {
+    if (!isAdmin(req)) return res.status(403).json({ ok: false, error: 'forbidden' });
+    
+    const { id } = req.params;
+    const { roles } = req.body; // Array of selected roles from frontend
+
+    if (!Array.isArray(roles)) {
+        return res.status(400).json({ ok: false, error: 'Roles must be an array' });
+    }
+
+    if ([9002, 9003, 9004].includes(Number(id))) {
+        return res.status(403).json({ ok: false, error: 'Cannot modify system users' });
+    }
+
+    const pool = await getPool();
+
+    // 1. Get the username
+    const userRes = await pool.request()
+        .input('UserID', sql.Int, id)
+        .query('SELECT LoginName FROM dbo.USERS WHERE UserID = @UserID');
+
+    if (userRes.recordset.length === 0) {
+        return res.status(404).json({ ok: false, error: 'User not found' });
+    }
+
+    const username = userRes.recordset[0].LoginName;
+
+    // 2. Fetch their TRUE current roles directly from BigFix (Source of Truth)
+    const ctx = getCtx();
+    const { BIGFIX_BASE_URL, BIGFIX_USER, BIGFIX_PASS, httpsAgent } = ctx.bigfix;
+    const auth = { username: BIGFIX_USER, password: BIGFIX_PASS };
+    
+    let oldRoles = [];
+    if (BIGFIX_BASE_URL) {
+        try {
+            const rolesUrl = joinUrl(BIGFIX_BASE_URL, `/api/operator/${encodeURIComponent(username)}/roles`);
+            const rolesResp = await axios.get(rolesUrl, { httpsAgent, auth, headers: { Accept: "application/xml" }, validateStatus: () => true });
+
+            if (rolesResp.status === 200) {
+                const xml = String(rolesResp.data || "");
+                const roleBlocks = xml.split("</Role>");
+                for (const block of roleBlocks) {
+                    const match = block.match(/<Name>(.*?)<\/Name>/i);
+                    if (match) oldRoles.push(match[1].trim());
+                }
+            }
+        } catch (err) {
+            logger.warn(`Failed to fetch current roles for ${username} during update: ${err.message}`);
+        }
+    }
+
+    // 3. Calculate exactly what to add and what to remove
+    const rolesToAdd = roles.filter(r => !oldRoles.includes(r) && r !== 'Admin');
+    const rolesToRemove = oldRoles.filter(r => !roles.includes(r) && r !== 'Admin');
+
+    // 4. Sync removals with BigFix
+    for (const roleToRemove of rolesToRemove) {
+        try {
+            await unassignUserFromRole(username, roleToRemove);
+        } catch (bfErr) {
+            logger.warn(`[RBAC] Failed to remove ${username} from ${roleToRemove} in BigFix: ${bfErr.message}`);
+        }
+    }
+
+    // 5. Sync additions with BigFix
+    for (const roleToAdd of rolesToAdd) {
+        try {
+            await assignUserToRole(username, roleToAdd);
+        } catch (bfErr) {
+            logger.warn(`[RBAC] Failed to add ${username} to ${roleToAdd} in BigFix: ${bfErr.message}`);
+        }
+    }
+
+    // 6. Update local database so it matches BigFix
+    const newRoleString = roles.join(', ');
+    await pool.request()
+        .input('Role', sql.NVarChar(4000), newRoleString) 
+        .input('UserID', sql.Int, id)
+        .query('UPDATE dbo.USERS SET Role = @Role, UpdatedAt = SYSUTCDATETIME() WHERE UserID = @UserID');
+
+    res.json({ ok: true, message: `Roles updated successfully.` });
+  } catch (e) { 
+    res.status(500).json({ ok: false, error: e.message }); 
+  }
 });
 
 module.exports = router;
