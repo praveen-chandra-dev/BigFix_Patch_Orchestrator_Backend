@@ -93,19 +93,30 @@ function attachGroupRoutes(app, ctx) {
         const isMO = await isMasterOperator(req, ctx, activeUser);
 
         let siteFilter = "";
-        if (!isMO && activeRole && activeRole !== "Admin" && activeRole !== "No Role Assigned") {
-            const roleAssets = await getRoleAssets(req, ctx, activeRole);
-            const allowedSites = [...(roleAssets.customSites || []), ...(roleAssets.externalSites || [])].map(s => `"${s.toLowerCase()}"`).join("; ");
-            if (allowedSites) siteFilter = ` whose (name of site of it as lowercase is contained by set of (${allowedSites}) or name of site of it as lowercase = "actionsite" or name of site of it as lowercase = "master action site")`;
-            else siteFilter = ` whose (name of site of it as lowercase = "actionsite" or name of site of it as lowercase = "master action site")`;
+        let memberCountRelevance = `number of members of it`; 
+
+        if (!isMO) {
+            if (!activeRole || activeRole === "No Role Assigned") {
+                siteFilter = ` whose (false)`; 
+                memberCountRelevance = `0`;
+            } else if (activeRole !== "Admin") {
+                const roleAssets = await getRoleAssets(req, ctx, activeRole);
+                const allowedSites = [...(roleAssets.customSites || []), ...(roleAssets.externalSites || [])].map(s => `"${s.toLowerCase()}"`).join("; ");
+                if (allowedSites) siteFilter = ` whose (name of site of it as lowercase is contained by set of (${allowedSites}) or name of site of it as lowercase = "actionsite" or name of site of it as lowercase = "master action site")`;
+                else siteFilter = ` whose (name of site of it as lowercase = "actionsite" or name of site of it as lowercase = "master action site")`;
+
+                // 🚀 Safest BigFix Syntax to count valid computers without throwing Nonexistent Object Errors
+                if (roleAssets.found && roleAssets.compNames && roleAssets.compNames.length > 0) {
+                    const names = roleAssets.compNames.map(n => `"${n.toLowerCase()}"`).join(";");
+                    memberCountRelevance = `number of members whose (exists name whose (it as lowercase is contained by set of (${names})) of it) of it`;
+                } else {
+                    memberCountRelevance = `0`;
+                }
+            }
         }
 
-        // const relevance = `(id of it as string & "||" & name of it) of bes computer groups${siteFilter}`;
-
-        // 🚀 Added 'number of members' to the relevance query
-            const relevance = `(id of it as string & "||" & name of it & "||" & (number of members of it as string | "0")) of bes computer groups${siteFilter}`;
+        const relevance = `(id of it as string & "||" & name of it & "||" & (${memberCountRelevance} as string | "0")) of bes computer groups${siteFilter}`;
         
-        // CRITICAL FIX: Safe read using Master Creds since RBAC is handled above via siteFilter
         const bfAuthOpts = await getBfAuthContext(req, ctx); 
         const url = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(relevance)}`;
         
@@ -127,7 +138,9 @@ function attachGroupRoutes(app, ctx) {
 
   app.post("/api/groups/create", async (req, res) => {
     req._logStart = Date.now();
-    const { name, type, targetSite, conditions, computerIds } = req.body;
+    const { name, type, targetSite, conditions, computerIds, logic } = req.body;
+    const isIntersection = logic === "Any" ? "false" : "true";
+
     const userRole = req.headers['x-user-role'] || 'Admin';
     if (!name) return res.status(400).json({ ok: false, error: "Group name is required" });
     
@@ -160,7 +173,7 @@ function attachGroupRoutes(app, ctx) {
                 if (!propId) throw new Error(`Could not resolve BigFix Property ID for '${cond.property}'.`);
                 searchComponents += `<MembershipRule Comparison="${escapeXML(cond.operator)}"><PropertyID>${escapeXML(propId)}</PropertyID><SearchText>${escapeXML(cond.value)}</SearchText></MembershipRule>`;
             }
-            xmlBody = `<?xml version="1.0" encoding="UTF-8"?><BESAPI xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="BESAPI.xsd"><ServerBasedGroup><Name>${escapeXML(name)}</Name><MembershipRules JoinByIntersection="true">${searchComponents}</MembershipRules></ServerBasedGroup></BESAPI>`;
+            xmlBody = `<?xml version="1.0" encoding="UTF-8"?><BESAPI xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="BESAPI.xsd"><ServerBasedGroup><Name>${escapeXML(name)}</Name><MembershipRules JoinByIntersection="${isIntersection}">${searchComponents}</MembershipRules></ServerBasedGroup></BESAPI>`;
         } else {
             if (!conditions?.length) return res.status(400).json({ok:false, error: "No conditions provided"});
             const sitePath = targetSite ? (targetSite.toLowerCase() === 'actionsite' || targetSite.toLowerCase() === 'master action site' ? '/master' : `/custom/${encodeURIComponent(targetSite)}`) : "/master";
@@ -168,7 +181,7 @@ function attachGroupRoutes(app, ctx) {
             phantomCheckEndpoint = `/api/computergroups${sitePath}`;
             
             const searchComponents = conditions.map(cond => `<SearchComponentPropertyReference PropertyName="${escapeXML(cond.property)}" Comparison="${escapeXML(cond.operator)}"><SearchText>${escapeXML(cond.value)}</SearchText><Relevance></Relevance></SearchComponentPropertyReference>`).join("");
-            xmlBody = `<BES xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="BES.xsd"><ComputerGroup><Title>${escapeXML(name)}</Title><JoinByIntersection>true</JoinByIntersection>${searchComponents}</ComputerGroup></BES>`;
+            xmlBody = `<BES xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="BES.xsd"><ComputerGroup><Title>${escapeXML(name)}</Title><JoinByIntersection>${isIntersection}</JoinByIntersection>${searchComponents}</ComputerGroup></BES>`;
         }
 
         const postUrl = joinUrl(BIGFIX_BASE_URL, endpoint);
@@ -302,13 +315,17 @@ function attachGroupRoutes(app, ctx) {
         
         let computerList = globalComputersCache.data || [];
 
-        if (!isMO && activeRole && activeRole !== "Admin" && activeRole !== "No Role Assigned") {
-            const roleAssets = await getRoleAssets(req, ctx, activeRole);
-            if (roleAssets.found) {
-                const allowedSet = new Set(roleAssets.compNames.map(c => c.toLowerCase()));
-                computerList = computerList.filter(c => allowedSet.has(c.name.toLowerCase()));
-            } else {
+        if (!isMO) {
+            if (!activeRole || activeRole === "No Role Assigned") {
                 computerList = []; 
+            } else if (activeRole !== "Admin") {
+                const roleAssets = await getRoleAssets(req, ctx, activeRole);
+                if (roleAssets.found) {
+                    const allowedSet = new Set(roleAssets.compNames.map(c => c.toLowerCase()));
+                    computerList = computerList.filter(c => allowedSet.has(c.name.toLowerCase()));
+                } else {
+                    computerList = []; 
+                }
             }
         }
 
@@ -330,13 +347,20 @@ function attachGroupRoutes(app, ctx) {
       const isMO = await isMasterOperator(req, ctx, activeUser);
       const client = bigfixClient(req, ctx); 
       let members = await client.getGroupMembers(req.params.name);
-      
-      if (!isMO && activeRole && activeRole !== "Admin" && activeRole !== "No Role Assigned") {
-          const roleAssets = await getRoleAssets(req, ctx, activeRole);
-          if (roleAssets.found && roleAssets.compNames.length > 0) {
-              members = members.filter(m => roleAssets.compNames.includes(m.name.toLowerCase()));
+
+      if (!isMO) {
+          if (!activeRole || activeRole === "No Role Assigned") {
+              members = []; 
+          } else if (activeRole !== "Admin") {
+              const roleAssets = await getRoleAssets(req, ctx, activeRole);
+              if (roleAssets.found && roleAssets.compNames.length > 0) {
+                  members = members.filter(m => roleAssets.compNames.includes(m.name.toLowerCase()));
+              } else {
+                  members = [];
+              }
           }
       }
+
       res.json({ ok: true, members });
     } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   });
@@ -362,9 +386,7 @@ function attachGroupRoutes(app, ctx) {
       } catch (e) { res.status(500).json({ok:false, error:e.message}); }
   });
 
-
-
-app.get("/api/groups/manage", async (req, res) => {
+  app.get("/api/groups/manage", async (req, res) => {
     req._logStart = Date.now();
     try {
         const activeRole = req.headers['x-user-role'] || getSessionRole(req);
@@ -372,7 +394,7 @@ app.get("/api/groups/manage", async (req, res) => {
         const isMO = await isMasterOperator(req, ctx, activeUser);
         const forceRefresh = req.query.refresh === 'true';
 
-        // 🚀 1. CACHE CHECK: Serve instantly if we fetched within the last 5 minutes
+        // 1. CACHE CHECK: Serve instantly if we fetched within the last 5 minutes
         const cacheKey = `${activeUser}_${activeRole}`;
         const now = Date.now();
         if (!forceRefresh && manageGroupsCache[cacheKey] && (now - manageGroupsCache[cacheKey].lastFetch < 5 * 60 * 1000)) {
@@ -380,16 +402,30 @@ app.get("/api/groups/manage", async (req, res) => {
             return res.json({ ok: true, groups: manageGroupsCache[cacheKey].data });
         }
 
-        // Role-Based Filtering Logic
         let siteFilter = "";
-        if (!isMO && activeRole && activeRole !== "Admin" && activeRole !== "No Role Assigned") {
-            const roleAssets = await getRoleAssets(req, ctx, activeRole);
-            const allowedSites = [...(roleAssets.customSites || []), ...(roleAssets.externalSites || [])].map(s => `"${s.toLowerCase()}"`).join("; ");
-            if (allowedSites) siteFilter = ` whose (name of site of it as lowercase is contained by set of (${allowedSites}) or name of site of it as lowercase = "actionsite" or name of site of it as lowercase = "master action site")`;
-            else siteFilter = ` whose (name of site of it as lowercase = "actionsite" or name of site of it as lowercase = "master action site")`;
+        let memberCountRelevance = `number of members of it`; 
+
+        if (!isMO) {
+            if (!activeRole || activeRole === "No Role Assigned") {
+                siteFilter = ` whose (false)`; 
+                memberCountRelevance = `0`;
+            } else if (activeRole !== "Admin") {
+                const roleAssets = await getRoleAssets(req, ctx, activeRole);
+                const allowedSites = [...(roleAssets.customSites || []), ...(roleAssets.externalSites || [])].map(s => `"${s.toLowerCase()}"`).join("; ");
+                if (allowedSites) siteFilter = ` whose (name of site of it as lowercase is contained by set of (${allowedSites}) or name of site of it as lowercase = "actionsite" or name of site of it as lowercase = "master action site")`;
+                else siteFilter = ` whose (name of site of it as lowercase = "actionsite" or name of site of it as lowercase = "master action site")`;
+
+                // 🚀 Safest BigFix Syntax to count valid computers without throwing Nonexistent Object Errors
+                if (roleAssets.found && roleAssets.compNames && roleAssets.compNames.length > 0) {
+                    const names = roleAssets.compNames.map(n => `"${n.toLowerCase()}"`).join(";");
+                    memberCountRelevance = `number of members whose (exists name whose (it as lowercase is contained by set of (${names})) of it) of it`;
+                } else {
+                    memberCountRelevance = `0`;
+                }
+            }
         }
 
-        const relevance = `((id of it as string | "N/A") & "||" & (name of it as string | "N/A") & "||" & (if automatic flag of it then "Automatic" else if manual flag of it then "Manual" else "Server Based") & "||" & (name of site of it as string | "N/A") & "||" & (number of members of it as string | "0")) of bes computer groups${siteFilter}`;
+        const relevance = `((id of it as string | "N/A") & "||" & (name of it as string | "N/A") & "||" & (if automatic flag of it then "Automatic" else if manual flag of it then "Manual" else "Server Based") & "||" & (name of site of it as string | "N/A") & "||" & (${memberCountRelevance} as string | "0")) of bes computer groups${siteFilter}`;
         
         const bfAuthOpts = await getBfAuthContext(req, ctx);
         const url = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(relevance)}`;
@@ -406,22 +442,22 @@ app.get("/api/groups/manage", async (req, res) => {
             });
         }
 
-        // 🚀 2. SAVE TO CACHE
+        // 2. SAVE TO CACHE
         manageGroupsCache[cacheKey] = { data: groups, lastFetch: now };
 
         res.json({ ok: true, groups });
     } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
   });
 
-app.get("/api/groups/computers-extended", async (req, res) => {
+  app.get("/api/groups/computers-extended", async (req, res) => {
       try {
           const activeRole = req.headers['x-user-role'] || getSessionRole(req);
           const activeUser = getSessionUser(req);
-          const groupId = req.query.groupId; // Optional: To fetch for a specific group
+          const groupId = req.query.groupId; 
 
           const isMO = await isMasterOperator(req, ctx, activeUser);
 
-          // 1. Determine Target (All computers OR specific group)
+          // 1. Determine Target
           let target = "bes computers";
           if (groupId) {
               target = `members of bes computer groups whose (id of it as string = "${escapeXML(groupId)}")`;
@@ -429,24 +465,28 @@ app.get("/api/groups/computers-extended", async (req, res) => {
 
           // 2. Apply RBAC Constraints
           let compFilter = "";
-          if (!isMO && activeRole && activeRole !== "Admin" && activeRole !== "No Role Assigned") {
-              const roleAssets = await getRoleAssets(req, ctx, activeRole);
-              if (roleAssets.found && roleAssets.compNames.length > 0) {
-                  const names = roleAssets.compNames.map(n => `"${n.toLowerCase()}"`).join(";");
-                  compFilter = ` whose (name of it as lowercase is contained by set of (${names}))`;
-              } else {
-                  return res.json({ ok: true, computers: [] }); // User has no computers assigned
+          if (!isMO) {
+              if (!activeRole || activeRole === "No Role Assigned") {
+                  return res.json({ ok: true, computers: [] }); 
+              } else if (activeRole !== "Admin") {
+                  const roleAssets = await getRoleAssets(req, ctx, activeRole);
+                  if (roleAssets.found && roleAssets.compNames.length > 0) {
+                      const names = roleAssets.compNames.map(n => `"${n.toLowerCase()}"`).join(";");
+                      compFilter = ` whose (exists name whose (it as lowercase is contained by set of (${names})) of it)`;
+                  } else {
+                      return res.json({ ok: true, computers: [] }); 
+                  }
               }
           }
 
           const combinedTarget = groupId ? `(${target})${compFilter}` : `bes computers${compFilter}`;
 
-          // 3. Your Specific Relevance Query
+          // 3. Properties Relevance
           const properties = `(if exists values of results (it, bes property "Computer Name") then concatenation ";" of values of results (it, bes property "Computer Name") else "N/A") & " | " & (if exists values of results (it, bes property "OS") then concatenation ";" of values of results (it, bes property "OS") else "N/A") & " | " & (if exists values of results (it, bes property "Last Report Time") then concatenation ";" of values of results (it, bes property "Last Report Time") else "N/A") & " | " & (if exists values of results (it, bes property "Locked") then concatenation ";" of values of results (it, bes property "Locked") else "N/A") & " | " & (if exists values of results (it, bes property "Relay") then concatenation ";" of values of results (it, bes property "Relay") else "N/A") & " | " & (if exists values of results (it, bes property "DNS Name") then concatenation ";" of values of results (it, bes property "DNS Name") else "N/A") & " | " & (if exists values of results (it, bes property "IP Address") then concatenation ";" of values of results (it, bes property "IP Address") else "N/A") & " | " & (if exists values of results (it, bes property "BES Root Server") then concatenation ";" of values of results (it, bes property "BES Root Server") else "N/A") & " | " & (if exists values of results (it, bes property "Agent Type") then concatenation ";" of values of results (it, bes property "Agent Type") else "N/A") & " | " & (if exists values of results (it, bes property "Device Type") then concatenation ";" of values of results (it, bes property "Device Type") else "N/A") & " | " & (if exists values of results (it, bes property "Agent Version") then concatenation ";" of values of results (it, bes property "Agent Version") else "N/A") & " | " & (if exists values of results (it, bes property "OS Version") then concatenation ";" of values of results (it, bes property "OS Version") else "N/A")`;
           
           const finalRelevance = `((id of it as string | "0") & " | " & ${properties}) of ${combinedTarget}`;
           
-          const bfAuthOpts = await getBfAuthContext(null, ctx); // Run as master since RBAC is handled above
+          const bfAuthOpts = await getBfAuthContext(null, ctx); 
           const url = `${joinUrl(BIGFIX_BASE_URL, "/api/query")}?output=json&relevance=${encodeURIComponent(finalRelevance)}`;
           
           const resp = await axios.get(url, { ...bfAuthOpts, headers: { Accept: "application/json" } });

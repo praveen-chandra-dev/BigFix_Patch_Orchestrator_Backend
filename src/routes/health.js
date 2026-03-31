@@ -61,10 +61,20 @@ function attachHealthRoutes(app, ctx) {
 
       let compList = globalHealthCache.totalComputers.data || [];
 
-      if (!isMO && activeRole && activeRole !== "Admin" && activeRole !== "No Role Assigned") {
-          const roleAssets = await getRoleAssets(req, ctx, activeRole);
-          const allowedSet = new Set(roleAssets.found ? roleAssets.compNames : []);
-          compList = compList.filter(c => allowedSet.has(c));
+      // if (!isMO && activeRole && activeRole !== "Admin" && activeRole !== "No Role Assigned") {
+      //     const roleAssets = await getRoleAssets(req, ctx, activeRole);
+      //     const allowedSet = new Set(roleAssets.found ? roleAssets.compNames : []);
+      //     compList = compList.filter(c => allowedSet.has(c));
+      // }
+
+      if (!isMO) {
+          if (!activeRole || activeRole === "No Role Assigned") {
+              compList = []; // 🚀 explicitly block all data (use rows = [] for the other two routes)
+          } else if (activeRole !== "Admin") {
+              const roleAssets = await getRoleAssets(req, ctx, activeRole);
+              const allowedSet = new Set(roleAssets.found ? roleAssets.compNames : []);
+              compList = compList.filter(c => allowedSet.has(c));
+          }
       }
 
       if (req.query.group) {
@@ -125,10 +135,19 @@ function attachHealthRoutes(app, ctx) {
         return issues.length > 0 ? { ...r, issues } : null;
       }).filter(Boolean);
 
-      if (!isMO && activeRole && activeRole !== "Admin" && activeRole !== "No Role Assigned") {
-          const roleAssets = await getRoleAssets(req, ctx, activeRole);
-          const allowedSet = new Set(roleAssets.found ? roleAssets.compNames : []);
-          rows = rows.filter(r => allowedSet.has(String(r.server).toLowerCase().trim()));
+      // if (!isMO && activeRole && activeRole !== "Admin" && activeRole !== "No Role Assigned") {
+      //     const roleAssets = await getRoleAssets(req, ctx, activeRole);
+      //     const allowedSet = new Set(roleAssets.found ? roleAssets.compNames : []);
+      //     rows = rows.filter(r => allowedSet.has(String(r.server).toLowerCase().trim()));
+      // }
+      if (!isMO) {
+          if (!activeRole || activeRole === "No Role Assigned") {
+              rows = []; // 🚀 explicitly block all data (use rows = [] for the other two routes)
+          } else if (activeRole !== "Admin") {
+              const roleAssets = await getRoleAssets(req, ctx, activeRole);
+              const allowedSet = new Set(roleAssets.found ? roleAssets.compNames : []);
+              rows = rows.filter(r => allowedSet.has(String(r.server).toLowerCase().trim()));
+          }
       }
       
       if (req.query.group) {
@@ -176,11 +195,20 @@ function attachHealthRoutes(app, ctx) {
 
       let rows = globalHealthCache.reboot.data || [];
 
-      if (!isMO && activeRole && activeRole !== "Admin" && activeRole !== "No Role Assigned") {
-          const roleAssets = await getRoleAssets(req, ctx, activeRole);
-          const allowedSet = new Set(roleAssets.found ? roleAssets.compNames : []);
-          rows = rows.filter(r => allowedSet.has(String(r.server).toLowerCase().trim()));
-      }
+      // if (!isMO && activeRole && activeRole !== "Admin" && activeRole !== "No Role Assigned") {
+      //     const roleAssets = await getRoleAssets(req, ctx, activeRole);
+      //     const allowedSet = new Set(roleAssets.found ? roleAssets.compNames : []);
+      //     rows = rows.filter(r => allowedSet.has(String(r.server).toLowerCase().trim()));
+      // }
+        if (!isMO) {
+            if (!activeRole || activeRole === "No Role Assigned") {
+                rows = []; // 🚀 explicitly block all data (use rows = [] for the other two routes)
+            } else if (activeRole !== "Admin") {
+                const roleAssets = await getRoleAssets(req, ctx, activeRole);
+                const allowedSet = new Set(roleAssets.found ? roleAssets.compNames : []);
+                rows = rows.filter(r => allowedSet.has(String(r.server).toLowerCase().trim()));
+            }
+        }
 
       if (req.query.group) {
          const client = bigfixClient(req, ctx);

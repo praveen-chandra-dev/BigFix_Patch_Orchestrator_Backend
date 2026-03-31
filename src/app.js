@@ -11,6 +11,8 @@ const { attachBaselineRoutes } = require("./routes/baseline");
 const { attachGroupRoutes } = require("./routes/groups");
 const { logger } = require("./services/logger");
 
+const { attachGroupUpdateRoutes } = require("./routes/groupUpdate");
+
 function tryRequire(p) { try { return require(p); } catch (e) { console.warn(`[skip] ${p}:`, e.message); return null; } }
 function isRouter(mod) { return !!(mod && typeof mod.use === "function" && mod.handle); }
 
@@ -77,6 +79,7 @@ function buildApp() {
   const envRouterPath = require.resolve("./routes/env");
   console.log("[env-router] mounting:", envRouterPath);
   app.use("/api", require("./routes/env"));
+  attachGroupUpdateRoutes(app, ctx);
 
   attachFlexible(app, ctx, "./routes/health", "attachHealthRoutes");
   attachFlexible(app, ctx, "./routes/config", "attachConfigRoutes");

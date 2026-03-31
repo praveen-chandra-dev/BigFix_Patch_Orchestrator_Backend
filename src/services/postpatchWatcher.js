@@ -104,7 +104,7 @@ async function executeStopAndMail(ctx, id, entry, reason = "Stopped by Schedule"
       await axios.post(stopUrl, "", { ...bfAuthOpts, headers: { "Content-Type": "application/xml" }, validateStatus: () => true });
       console.log(`[Scheduler] ✅ Action ${id} successfully STOPPED via API.`);
     } catch (stopErr) { console.warn(`[Scheduler] ⚠️ Failed to stop action ${id}:`, stopErr.message); }
-    await new Promise(r => setTimeout(r, 5000));
+    //await new Promise(r => setTimeout(r, 5000));
   }
 
   const { text } = await getActionStatusXml(ctx.bigfix, id);
