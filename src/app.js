@@ -11,8 +11,6 @@ const { attachBaselineRoutes } = require("./routes/baseline");
 const { attachGroupRoutes } = require("./routes/groups");
 const { logger } = require("./services/logger");
 
-const { attachGroupUpdateRoutes } = require("./routes/groupUpdate");
-
 function tryRequire(p) { try { return require(p); } catch (e) { console.warn(`[skip] ${p}:`, e.message); return null; } }
 function isRouter(mod) { return !!(mod && typeof mod.use === "function" && mod.handle); }
 
@@ -79,7 +77,6 @@ function buildApp() {
   const envRouterPath = require.resolve("./routes/env");
   console.log("[env-router] mounting:", envRouterPath);
   app.use("/api", require("./routes/env"));
-  attachGroupUpdateRoutes(app, ctx);
 
   attachFlexible(app, ctx, "./routes/health", "attachHealthRoutes");
   attachFlexible(app, ctx, "./routes/config", "attachConfigRoutes");
@@ -93,6 +90,7 @@ function buildApp() {
   attachFlexible(app, ctx, "./routes/groups", "attachGroupRoutes");
   attachFlexible(app, ctx, "./routes/vcenter", "attachVcenterRoutes");
   attachFlexible(app, ctx, "./routes/riskBaselines", "attachBaselineRoutes");
+  attachFlexible(app, ctx, "./routes/groupUpdate", "attachGroupUpdateRoutes"); // 🚀 ADDED THIS LINE!
   
   // NEW ROLE ROUTES
   attachFlexible(app, ctx, "./routes/roles", "attachRoleRoutes");
@@ -106,7 +104,14 @@ function buildApp() {
   if (patchRouter) app.use("/api/patches", patchRouter);
   if (cveRouter) app.use("/api/cves", cveRouter);
   if (sitesRouter) app.use("/api/sites", sitesRouter);
-
+  const policiesRouter = tryRequire("./routes/policies");
+  if (policiesRouter) {
+    app.use(policiesRouter);
+    // Start per-policy background refresh scheduler
+    if (typeof policiesRouter.startPolicyRefreshScheduler === "function") {
+      policiesRouter.startPolicyRefreshScheduler(app);
+    }
+  }
 
   const { warmCache } = require("./services/cacheWarmup");
 
