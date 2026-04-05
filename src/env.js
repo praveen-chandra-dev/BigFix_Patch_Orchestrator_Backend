@@ -53,6 +53,7 @@ const UI_KEYS = new Set([
   "SMTP_FROM", "SMTP_TO", "SMTP_CC", "SMTP_BCC",
   "SMTP_USER", "SMTP_PASSWORD",
   "LDAP_ENABLED", "LDAP_URL", "LDAP_DOMAIN", "LDAP_ALLOW_SELF_SIGNED",
+  "SAML_ENABLED", "SAML_ENTRY_POINT", "SAML_ISSUER", "SAML_CERT", "FORCE_SSO",
   "DEBUG_LOG",
 ]);
 
@@ -190,6 +191,13 @@ function buildCfg(dictRaw, dbOverrides = {}) {
     LDAP_URL: merged.LDAP_URL || "",
     LDAP_DOMAIN: merged.LDAP_DOMAIN || "",
     LDAP_ALLOW_SELF_SIGNED: bool(merged.LDAP_ALLOW_SELF_SIGNED, false),
+
+    // 🚀 ADDED SAML VARIABLES
+    SAML_ENABLED: bool(merged.SAML_ENABLED, false),
+    SAML_ENTRY_POINT: merged.SAML_ENTRY_POINT || "",
+    SAML_ISSUER: merged.SAML_ISSUER || "patch-setu-app",
+    SAML_CERT: merged.SAML_CERT || "",
+    FORCE_SSO: bool(merged.FORCE_SSO, false),
 
     SMTP_HOST: merged.SMTP_HOST || "",
     SMTP_PORT: merged.SMTP_PORT || "",

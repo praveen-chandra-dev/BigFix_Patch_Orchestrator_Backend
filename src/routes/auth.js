@@ -904,6 +904,7 @@ const teamController = require('../controllers/team.controller');
 // 3. Import our newly modularized User Controllers (resolves to src/controllers/user/index.js)
 const userController = require('../controllers/user');
 const myRolesController = require('../controllers/myRoles.controller');
+const samlController = require('../controllers/saml.controller');
 
 // Set payload limit
 router.use(express.json({ limit: '1mb' }));
@@ -919,6 +920,11 @@ router.get('/api/auth/roles', myRolesController.getMyRoles);
 
 router.get('/api/auth/setup-required', setupController.setupRequired);
 router.post('/api/auth/signup', setupController.signup);
+
+// 🚀 ADD THESE TWO LINES FOR OKTA SAML:
+router.get('/api/auth/saml/login', samlController.samlLogin);
+// We use express.urlencoded because Okta sends the response back as an HTML Form POST!
+router.post('/api/auth/saml/callback', require('express').urlencoded({ extended: true, limit: '10mb' }), samlController.samlCallback);
 
 // ==========================================
 // PASSWORD MANAGEMENT
