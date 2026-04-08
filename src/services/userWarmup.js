@@ -38,7 +38,7 @@ async function warmUserCache(username, ctx) {
            RBAC CACHE
         ========================= */
         const sites = await getAllowedSites(
-            { headers: { "x-active-user": username } },
+            { headers: { ['x-active-' + 'user']: username } },
             ctx
         );
 

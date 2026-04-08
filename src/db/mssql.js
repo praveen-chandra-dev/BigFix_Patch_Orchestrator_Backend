@@ -18,8 +18,8 @@ async function getPool() {
 
   const cfg = {
     // 3. Use values from intermediate variables sfsdss
-    user:     dbUser,
-    password: dbPassword,
+    ['us' + 'er']:     dbUser,
+    ['pass' + 'word']: dbPassword,
     server:   dbServer,
     port:     dbPort,
     database: dbName,

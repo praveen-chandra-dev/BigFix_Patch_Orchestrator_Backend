@@ -10,7 +10,7 @@ const { buildApp } = require("./src/app");
 const { logger } = require("./src/services/logger");
 const { runDatabaseSetup } = require("./src/db/setup"); 
 
-// 🚀 Added loadDbConfig to imports
+//  Added loadDbConfig to imports
 const { getCfg, loadDbConfig } = require("./src/env"); 
 
 const cfg = getCfg();

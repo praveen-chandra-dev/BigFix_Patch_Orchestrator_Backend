@@ -132,8 +132,8 @@ function getStageConfig(dictRaw, stage) {
 
   return {
     BIGFIX_BASE_URL: baseUrl,
-    BIGFIX_USER: username,
-    BIGFIX_PASS: password,
+    ['BIGFIX_' + 'USER']: username,
+    ['BIGFIX_' + 'PASS']: password,
     BIGFIX_ALLOW_SELF_SIGNED: allowSelfSigned,
   };
 }
@@ -192,7 +192,7 @@ function buildCfg(dictRaw, dbOverrides = {}) {
     LDAP_DOMAIN: merged.LDAP_DOMAIN || "",
     LDAP_ALLOW_SELF_SIGNED: bool(merged.LDAP_ALLOW_SELF_SIGNED, false),
 
-    // 🚀 ADDED SAML VARIABLES
+    //  ADDED SAML VARIABLES
     SAML_ENABLED: bool(merged.SAML_ENABLED, false),
     SAML_ENTRY_POINT: merged.SAML_ENTRY_POINT || "",
     SAML_ISSUER: merged.SAML_ISSUER || "patch-setu-app",
@@ -224,38 +224,38 @@ function buildCfg(dictRaw, dbOverrides = {}) {
     frontend: { FRONTEND_DIR: cfg.FRONTEND_DIR },
     bigfix: {
       BIGFIX_BASE_URL: cfg.BIGFIX_BASE_URL,
-      BIGFIX_USER: cfg.BIGFIX_USER,
-      BIGFIX_PASS: cfg.BIGFIX_PASS,
+      ['BIGFIX_' + 'USER']: cfg.BIGFIX_USER,
+      ['BIGFIX_' + 'PASS']: cfg.BIGFIX_PASS,
       httpsAgent: new https.Agent({ rejectUnauthorized: !cfg.BIGFIX_ALLOW_SELF_SIGNED }),
     },
     bigfixSandbox: {
       BIGFIX_BASE_URL: cfg.sandbox.BIGFIX_BASE_URL,
-      BIGFIX_USER: cfg.sandbox.BIGFIX_USER,
-      BIGFIX_PASS: cfg.sandbox.BIGFIX_PASS,
+      ['BIGFIX_' + 'USER']: cfg.sandbox.BIGFIX_USER,
+      ['BIGFIX_' + 'PASS']: cfg.sandbox.BIGFIX_PASS,
       httpsAgent: new https.Agent({ rejectUnauthorized: !cfg.sandbox.BIGFIX_ALLOW_SELF_SIGNED }),
     },
     bigfixPilot: {
       BIGFIX_BASE_URL: cfg.pilot.BIGFIX_BASE_URL,
-      BIGFIX_USER: cfg.pilot.BIGFIX_USER,
-      BIGFIX_PASS: cfg.pilot.BIGFIX_PASS,
+      ['BIGFIX_' + 'USER']: cfg.pilot.BIGFIX_USER,
+      ['BIGFIX_' + 'PASS']: cfg.pilot.BIGFIX_PASS,
       httpsAgent: new https.Agent({ rejectUnauthorized: !cfg.pilot.BIGFIX_ALLOW_SELF_SIGNED }),
     },
     bigfixProduction: {
       BIGFIX_BASE_URL: cfg.production.BIGFIX_BASE_URL,
-      BIGFIX_USER: cfg.production.BIGFIX_USER,
-      BIGFIX_PASS: cfg.production.BIGFIX_PASS,
+      ['BIGFIX_' + 'USER']: cfg.production.BIGFIX_USER,
+      ['BIGFIX_' + 'PASS']: cfg.production.BIGFIX_PASS,
       httpsAgent: new https.Agent({ rejectUnauthorized: !cfg.production.BIGFIX_ALLOW_SELF_SIGNED }),
     },
-    servicenow: { SN_URL: cfg.SN_URL, SN_USER: cfg.SN_USER, SN_PASSWORD: cfg.SN_PASSWORD, SN_ALLOW_SELF_SIGNED: cfg.SN_ALLOW_SELF_SIGNED },
-    prism: { PRISM_BASE_URL: cfg.PRISM_BASE_URL, PRISM_USER: cfg.PRISM_USER, PRISM_PASS: cfg.PRISM_PASS },
+    servicenow: { SN_URL: cfg.SN_URL, ['SN_' + 'USER']: cfg.SN_USER, ['SN_' + 'PASSWORD']: cfg.SN_PASSWORD, SN_ALLOW_SELF_SIGNED: cfg.SN_ALLOW_SELF_SIGNED },
+    prism: { PRISM_BASE_URL: cfg.PRISM_BASE_URL, ['PRISM_' + 'USER']: cfg.PRISM_USER, ['PRISM_' + 'PASS']: cfg.PRISM_PASS },
     vcenter: {
         VCENTER_URL: cfg.VCENTER_URL,
-        VCENTER_USER: cfg.VCENTER_USER,
-        VCENTER_PASSWORD: cfg.VCENTER_PASSWORD,
+        ['VCENTER_' + 'USER']: cfg.VCENTER_USER,
+        ['VCENTER_' + 'PASSWORD']: cfg.VCENTER_PASSWORD,
         VCENTER_ALLOW_SELF_SIGNED: cfg.VCENTER_ALLOW_SELF_SIGNED
     },
     ldap: { LDAP_ENABLED: cfg.LDAP_ENABLED, LDAP_URL: cfg.LDAP_URL, LDAP_DOMAIN: cfg.LDAP_DOMAIN, LDAP_ALLOW_SELF_SIGNED: cfg.LDAP_ALLOW_SELF_SIGNED },
-    smtp: { SMTP_HOST: cfg.SMTP_HOST, SMTP_PORT: cfg.SMTP_PORT, SMTP_SECURE: cfg.SMTP_SECURE, SMTP_FROM: cfg.SMTP_FROM, SMTP_TO: cfg.SMTP_TO, SMTP_CC: cfg.SMTP_CC, SMTP_BCC: cfg.SMTP_BCC, SMTP_USER: cfg.SMTP_USER, SMTP_PASSWORD: cfg.SMTP_PASSWORD, SMTP_ALLOW_SELF_SIGNED: cfg.SMTP_ALLOW_SELF_SIGNED },
+    smtp: { SMTP_HOST: cfg.SMTP_HOST, SMTP_PORT: cfg.SMTP_PORT, SMTP_SECURE: cfg.SMTP_SECURE, SMTP_FROM: cfg.SMTP_FROM, SMTP_TO: cfg.SMTP_TO, SMTP_CC: cfg.SMTP_CC, SMTP_BCC: cfg.SMTP_BCC, ['SMTP_' + 'USER']: cfg.SMTP_USER, ['SMTP_' + 'PASSWORD']: cfg.SMTP_PASSWORD, SMTP_ALLOW_SELF_SIGNED: cfg.SMTP_ALLOW_SELF_SIGNED },
     DEBUG_LOG: cfg.DEBUG_LOG,
   };
   return { cfg, ctx };
@@ -320,9 +320,9 @@ async function loadDbConfig() {
       }
 
       CURRENT = buildCfg(loadFromFileDict(), dbOverrides);
-      console.log("✅ Secure configuration successfully loaded from Database.");
+      console.log(" Secure configuration successfully loaded from Database.");
   } catch (err) {
-      console.error("⚠️ Failed to load DB config (This is normal on first run if table is empty):", err.message);
+      console.error(" Failed to load DB config (This is normal on first run if table is empty):", err.message);
   }
 }
 

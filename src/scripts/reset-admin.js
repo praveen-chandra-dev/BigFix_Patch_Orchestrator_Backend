@@ -34,7 +34,7 @@ async function syncBigFixAdminPassword(username, newPassword) {
 
         // 3. PUSH TO BIGFIX
         await axios.put(opUrl, xml, { httpsAgent, auth, headers: { "Content-Type": "application/xml" }});
-        console.log(`✅ BigFix API updated successfully.`);
+        console.log(` BigFix API updated successfully.`);
 
         // 4. PREVENT THE 401 LOCKOUT
         if (username.toLowerCase() === BIGFIX_USER.toLowerCase()) {
@@ -63,7 +63,7 @@ async function syncBigFixAdminPassword(username, newPassword) {
         }
 
     } catch (error) {
-        console.warn(`⚠️ Warning: Failed to sync with BigFix: ${error.response?.data || error.message}`);
+        console.warn(` Warning: Failed to sync with BigFix: ${error.response?.data || error.message}`);
     }
 }
 
@@ -87,12 +87,12 @@ async function resetAdmin() {
         const userRecord = rs.recordset[0];
         
         if (!userRecord) {
-            console.error(`❌ User '${username}' not found in the database.`);
+            console.error(`User '${username}' not found in the database.`);
             process.exit(1);
         }
 
         if (userRecord.Role !== 'Admin') {
-            console.error(`❌ User '${username}' is not an Admin. Use the web UI to reset normal users.`);
+            console.error(` User '${username}' is not an Admin. Use the web UI to reset normal users.`);
             process.exit(1);
         }
 
@@ -110,12 +110,12 @@ async function resetAdmin() {
             .input('UID', sql.Int, userRecord.UserID)
             .query('UPDATE dbo.USERS SET PasswordHash=@Hash, PasswordSalt=@Salt, BfPasswordEncrypted=@BfEnc, UpdatedAt=SYSUTCDATETIME() WHERE UserID=@UID');
 
-        console.log(`✅ Success! Local Database updated.`);
+        console.log(` Success! Local Database updated.`);
         console.log("You can now log in using the new password.");
         process.exit(0);
 
     } catch (error) {
-        console.error("❌ An error occurred during the reset process:");
+        console.error("An error occurred during the reset process:");
         console.error(error);
         process.exit(1);
     }

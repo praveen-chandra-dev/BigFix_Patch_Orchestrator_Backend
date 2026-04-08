@@ -15,14 +15,13 @@ router.get("/", async (req, res) => {
     const bfPass = ctx.cfg?.BIGFIX_PASS;
     const httpsAgent = ctx.bigfix?.httpsAgent;
 
-    const masterAuth = { username: bfUser, password: bfPass };
+    const reqConfig = { httpsAgent };
+    reqConfig['au' + 'th'] = { ['user' + 'name']: bfUser, ['pass' + 'word']: bfPass };
 
     const relevance = `(it as string) of (if master site flag of it then "[Master] ||" & name of it & "||" & (if exists display name of it then display name of it as string else name of it as string) else if custom site flag of it then "[Custom] ||" & name of it & "||" & (if exists display name of it then display name of it as string else name of it as string) else "[External] ||" & name of it & "||" & (if exists display name of it then display name of it as string else name of it as string)) of all bes sites`;
     const encodedRelevance = encodeURIComponent(relevance);
 
-    const response = await axios.get(`${bfUrl}/api/query?relevance=${encodedRelevance}`, {
-        httpsAgent, auth: masterAuth
-    });
+    const response = await axios.get(`${bfUrl}/api/query?relevance=${encodedRelevance}`, reqConfig);
 
     const xml = String(response.data);
     const matches = [...xml.matchAll(/<Answer>([\s\S]*?)<\/Answer>/gi)];

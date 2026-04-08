@@ -74,7 +74,7 @@ async function isMasterOperator(req, ctx, operatorName) {
     try {
         const { BIGFIX_BASE_URL } = ctx.bigfix;
         
-        // 🚀 CRITICAL FIX: ALWAYS USE MASTER CREDS to verify MO status. Avoids NMO 401 crash.
+        //  CRITICAL FIX: ALWAYS USE MASTER CREDS to verify MO status. Avoids NMO 401 crash.
         const bfAuthOpts = await getBfAuthContext(null, ctx); 
         
         const url = joinUrl(BIGFIX_BASE_URL, `/api/operator/${encodeURIComponent(operatorName)}`);
@@ -105,7 +105,7 @@ const bigfixClient = (req, ctx) => {
   async function getGroupMembers(groupName) {
     const relevance = `((name of it | "N/A"), (if (exists values of results (it, bes properties "IP Address")) then (concatenation ", " of values of results (it, bes properties "IP Address")) else "N/A"), (operating system of it | "Unknown")) of members  whose (value of result (it, bes property "Device Type") as lowercase = "server") of bes computer group whose (name of it = "${groupName}")`;
     try {
-      // 🚀 CRITICAL FIX: Use Master Creds for fetching base data, RBAC filters it via Node cache later.
+      //  CRITICAL FIX: Use Master Creds for fetching base data, RBAC filters it via Node cache later.
       const bfAuthOpts = await getBfAuthContext(req, ctx);
       const res = await axios.get(`${BIGFIX_BASE_URL}/api/query`, { ...bfAuthOpts, params: { output: "json", relevance } });
       const result = res.data?.result;

@@ -12,7 +12,7 @@ const { getCtx } = require("../../env");
 
 const { getRoleAssets, isMasterOperator } = require("../../services/bigfix");
 
-// 🚀 IMPORT OUR SHARED HELPERS
+
 const { toCSV, getPatchWindowMs, msToXSDuration, localUtcOffsetMs, fetchBaselinePatches, patchesToCSV } = require("../../utils/deploymentHelpers");
 
 async function triggerAction(req, res) {
@@ -25,7 +25,7 @@ async function triggerAction(req, res) {
   const body = req.body || {};
 //   const { baselineName, groupName, autoMail, mailTo, mailFrom, mailCc, mailBcc, environment, patchWindow, enddatetimelocaloffset, endOffsetHours, endOffset, triggeredBy } = body;
   
-// 🚀 Read 'deployments' array instead of single baselineName/groupName
+
   const { deployments, autoMail, mailTo, mailFrom, mailCc, mailBcc, environment, patchWindow, enddatetimelocaloffset, endOffsetHours, endOffset, triggeredBy } = body;
   
   const frontendAutoMail = ["true", "1", "yes", "on", true, 1].includes(String(autoMail).toLowerCase());
@@ -182,16 +182,14 @@ async function triggerAction(req, res) {
 //     return res.json({ ok: true, actionId, siteName, fixletId, group: gName, title: actionTitle, stage: envLabel, endOffset: endDateTimeLocalOffsetVal, createdAt: new Date().toISOString(), preMail: shouldMail, preMailError: emailError });
 //   } catch (err) { return res.status(500).json({ ok: false, error: err?.response?.data || err.message }); }
     try {
-    // 🚀 Validate deployments array
+    
     if (!deployments || !Array.isArray(deployments) || deployments.length === 0) {
         return res.status(400).json({ ok: false, error: "deployments array is required" });
     }
 
     const bfAuthOpts = await getBfAuthContext(req, ctx); 
 
-    // ==========================================
-    // 🔒 YOUR EXACT RBAC LOGIC (Calculated once)
-    // ==========================================
+   
     const activeUser = getSessionUser(req);
     const activeRole = req.headers['x-user-role'] || getSessionRole(req);
     const isMO = await isMasterOperator(req, ctx, activeUser);
@@ -229,7 +227,7 @@ async function triggerAction(req, res) {
     let combinedPatchesCsvRows = [];
     const baselinePatchesCache = {};
 
-    // 🚀 MULTI-DEPLOYMENT LOOP
+    
     for (const dep of deployments) {
         const { baseline: baselineName, group: groupName } = dep;
         if (!baselineName || !groupName) continue;
@@ -317,7 +315,7 @@ async function triggerAction(req, res) {
           scheduleActionStop(ctx, actionId, metadata);
           generatedActions.push({ actionId, siteName, fixletId, group: gName, baseline: baselineName, title: actionTitle });
         }
-    } // 🚀 END OF LOOP
+    } 
 
     // 6) Send 1 Single Consolidated Mail
     let emailError = null;
@@ -330,7 +328,7 @@ async function triggerAction(req, res) {
       } catch (e) { emailError = e.message || String(e); }
     }
 
-    // 🚀 Return the array of actions to the frontend
+    
     return res.json({ ok: true, actions: generatedActions, stage: envLabel, endOffset: endDateTimeLocalOffsetVal, createdAt: new Date().toISOString(), preMail: shouldMail, preMailError: emailError });
   } catch (err) { return res.status(500).json({ ok: false, error: err?.response?.data || err.message }); }
 }

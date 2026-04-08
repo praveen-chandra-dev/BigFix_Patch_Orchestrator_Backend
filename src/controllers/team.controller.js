@@ -22,11 +22,22 @@ async function getTeamState(req, res) {
         const pool = await getPool();
         const roleBucket = `Role_${activeRole}`;
         
-        const stateRes = await pool.request().input('RoleKey', sql.NVarChar(50), roleBucket).query("SELECT StateValue FROM dbo.SystemState WHERE StateKey = @RoleKey");
+        const qSelect = "SELECT StateValue FROM dbo.SystemState WHERE StateKey = @RoleKey";
+        const qInsert = "INSERT INTO dbo.SystemState (StateKey, StateValue) VALUES (@RoleKey, @EmptyState)";
+        
+        const stateRes = await pool.request()
+            .input('RoleKey', sql.NVarChar(50), roleBucket)
+            .query(qSelect);
 
         let rawState = "{}";
-        if (stateRes.recordset.length > 0) rawState = stateRes.recordset[0].StateValue || "{}";
-        else await pool.request().input('RoleKey', sql.NVarChar(50), roleBucket).query("INSERT INTO dbo.SystemState (StateKey, StateValue) VALUES (@RoleKey, '{}')");
+        if (stateRes.recordset.length > 0) {
+            rawState = stateRes.recordset[0].StateValue || "{}";
+        } else {
+            await pool.request()
+                .input('RoleKey', sql.NVarChar(50), roleBucket)
+                .input('EmptyState', sql.NVarChar(sql.MAX), "{}") // Pass the literal as a parameter
+                .query(qInsert);
+        }
         
         res.json({ ok: true, role: activeRole, state: JSON.parse(rawState) });
     } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
@@ -48,13 +59,25 @@ async function updateTeamState(req, res) {
     }
     res.cookie('auth_session', JSON.stringify(session), getCookieOptions());
 
-    try {
+   try {
         const stateStr = JSON.stringify(req.body);
         const pool = await getPool();
         const roleBucket = `Role_${activeRole}`;
 
-        const updateRes = await pool.request().input('Val', sql.NVarChar(sql.MAX), stateStr).input('RoleKey', sql.NVarChar(50), roleBucket).query("UPDATE dbo.SystemState SET StateValue = @Val WHERE StateKey = @RoleKey");
-        if (updateRes.rowsAffected[0] === 0) await pool.request().input('Val', sql.NVarChar(sql.MAX), stateStr).input('RoleKey', sql.NVarChar(50), roleBucket).query("INSERT INTO dbo.SystemState (StateKey, StateValue) VALUES (@RoleKey, @Val)");
+        const qUpdate = "UPDATE dbo.SystemState SET StateValue = @Val WHERE StateKey = @RoleKey";
+        const qInsert = "INSERT INTO dbo.SystemState (StateKey, StateValue) VALUES (@RoleKey, @Val)";
+
+        const updateRes = await pool.request()
+            .input('Val', sql.NVarChar(sql.MAX), stateStr)
+            .input('RoleKey', sql.NVarChar(50), roleBucket)
+            .query(qUpdate);
+            
+        if (updateRes.rowsAffected[0] === 0) {
+            await pool.request()
+                .input('Val', sql.NVarChar(sql.MAX), stateStr)
+                .input('RoleKey', sql.NVarChar(50), roleBucket)
+                .query(qInsert);
+        }
         
         res.json({ ok: true, saved: true, role: activeRole });
     } catch (e) { res.status(500).json({ ok: false, error: e.message }); }

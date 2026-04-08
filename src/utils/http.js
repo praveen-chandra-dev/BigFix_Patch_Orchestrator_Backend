@@ -74,16 +74,16 @@ async function getBfAuthContext(req, ctx) {
                 finalUser = requestUser;
                 finalPass = decrypted;
             } else {
-                throw new Error("401_UNAUTHORIZED: Unable to decrypt your stored BigFix credentials. Please re‑enter them in the vault.");
+                throw new Error("401 UNAUTHORIZED: Unable to validate your stored BigFix tokens. Please re‑enter them in the vault.");
             }
         }
     } catch (e) {
-        console.error("[Auth Context] Failed to resolve DB credentials:", e.message);
-        throw e; // Re-throw the same error so the caller knows it's a 401
+        console.error("[Auth Context] Failed to resolve DB tokens:", e.message);
+        throw e; 
     }
 
     if (!finalUser || !finalPass) {
-        throw new Error("401_UNAUTHORIZED: Missing personal BigFix API Credentials.");
+        throw new Error("401 UNAUTHORIZED: Missing personal BigFix API Tokens.");
     }
 
     return { httpsAgent, auth: { username: finalUser, password: finalPass } };

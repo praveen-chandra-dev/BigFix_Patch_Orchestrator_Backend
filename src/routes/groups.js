@@ -105,7 +105,7 @@ function attachGroupRoutes(app, ctx) {
                 if (allowedSites) siteFilter = ` whose (name of site of it as lowercase is contained by set of (${allowedSites}) or name of site of it as lowercase = "actionsite" or name of site of it as lowercase = "master action site")`;
                 else siteFilter = ` whose (name of site of it as lowercase = "actionsite" or name of site of it as lowercase = "master action site")`;
 
-                // 🚀 Safest BigFix Syntax to count valid computers without throwing Nonexistent Object Errors
+                //  Safest BigFix Syntax to count valid computers without throwing Nonexistent Object Errors
                 if (roleAssets.found && roleAssets.compNames && roleAssets.compNames.length > 0) {
                     const names = roleAssets.compNames.map(n => `"${n.toLowerCase()}"`).join(";");
                     memberCountRelevance = `number of members whose (exists name whose (it as lowercase is contained by set of (${names})) of it) of it`;
@@ -415,7 +415,7 @@ function attachGroupRoutes(app, ctx) {
                 if (allowedSites) siteFilter = ` whose (name of site of it as lowercase is contained by set of (${allowedSites}) or name of site of it as lowercase = "actionsite" or name of site of it as lowercase = "master action site")`;
                 else siteFilter = ` whose (name of site of it as lowercase = "actionsite" or name of site of it as lowercase = "master action site")`;
 
-                // 🚀 Safest BigFix Syntax to count valid computers without throwing Nonexistent Object Errors
+                //  Safest BigFix Syntax to count valid computers without throwing Nonexistent Object Errors
                 if (roleAssets.found && roleAssets.compNames && roleAssets.compNames.length > 0) {
                     const names = roleAssets.compNames.map(n => `"${n.toLowerCase()}"`).join(";");
                     memberCountRelevance = `number of members whose (exists name whose (it as lowercase is contained by set of (${names})) of it) of it`;

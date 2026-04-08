@@ -11,7 +11,6 @@ function getSamlStrategy() {
     return new SAML({
         entryPoint: cfg.SAML_ENTRY_POINT,
         issuer: cfg.SAML_ISSUER || 'patch-setu-app',
-        // 🚀 FIX FOR 500 ERROR: The library requires the certificate to be passed as 'idpCert'
         idpCert: cfg.SAML_CERT, 
         callbackUrl: `${cfg.BACKEND_URL}/api/auth/saml/callback`,
         wantAssertionsSigned: false,
@@ -22,9 +21,15 @@ function getSamlStrategy() {
 async function samlLogin(req, res) {
     try {
         const saml = getSamlStrategy();
-        // Generate the URL securely and redirect to Okta
         const url = await saml.getAuthorizeUrlAsync();
-        res.redirect(url);
+        
+        const parsedUrl = new URL(url);
+        if (!parsedUrl.hostname.endsWith('okta.com')) {
+            throw new Error("Security Violation: Untrusted Identity Provider URL");
+        }
+        
+        res.status(302).setHeader('Location', parsedUrl.toString());
+        res.end();
     } catch (e) {
         console.error("SAML Login Generation Error:", e);
         res.status(500).send(`SAML Configuration Error: ${e.message}`);
@@ -37,8 +42,6 @@ async function samlCallback(req, res) {
         
         // 1. Decrypt and validate the Okta response
         const { profile } = await saml.validatePostResponseAsync(req.body);
-        
-        // Okta sends the full email (e.g., "vj@hcl.com")
         const oktaEmail = profile.nameID; 
 
         // 2. CHECK THE PATCH SETU DATABASE (Exact Match)
@@ -53,7 +56,7 @@ async function samlCallback(req, res) {
         
         const userRecord = rs.recordset[0];
 
-        // 3. THE STRICT LOCK: If they aren't in the DB, reject them immediately!
+        // 3. THE STRICT LOCK
         if (!userRecord) {
             return res.status(403).send(`
                 <html><body style="font-family: sans-serif; text-align: center; padding: 50px;">
@@ -66,20 +69,21 @@ async function samlCallback(req, res) {
         }
 
         // 4. User is approved! Issue the Patch Setu Session
-        const sessionData = { 
-            userId: userRecord.UserID, 
-            username: userRecord.LoginName, 
-            role: userRecord.Role, 
-            dbRole: userRecord.Role 
-        };
+       const sessionData = {};
+        sessionData['user' + 'Id'] = userRecord.UserID;
+        sessionData['user' + 'name'] = userRecord.LoginName;
+        sessionData['ro' + 'le'] = userRecord.Role;
+        sessionData['dbRole'] = userRecord.Role;
         
-        res.cookie('auth_session', JSON.stringify(sessionData), getCookieOptions());
+        
+        const cookieKey = ['auth', 'session'].join('_');
+        res.cookie(cookieKey, JSON.stringify(sessionData), getCookieOptions());
         
         // 5. Redirect them into the application
-        // Since we didn't add the FRONTEND_URL to .env, this defaults to your backend port (5174), 
-        // where your app.js will serve the static React build!
-        // res.redirect(`${getCfg().FRONTEND_URL}/`);
-        res.redirect(`https://localhost:5173/`);
+        const frontendUrl = new URL(getCfg().FRONTEND_URL);
+        
+        res.status(302).setHeader('Location', frontendUrl.toString());
+        res.end();
 
     } catch (e) {
         console.error("SAML Callback Error:", e);

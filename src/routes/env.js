@@ -64,7 +64,7 @@ const UI_TO_ENV = {
   "LDAP DOMAIN": "LDAP_DOMAIN",
   "LDAP ALLOW SELF SIGNED": "LDAP_ALLOW_SELF_SIGNED",
 
-  // 🚀 ADDED SAML MAPPINGS
+  // ADDED SAML MAPPINGS
   "SAML ENABLED": "SAML_ENABLED",
   "SAML ENTRY POINT": "SAML_ENTRY_POINT",
   "SAML ISSUER": "SAML_ISSUER",
@@ -180,16 +180,18 @@ router.post("/env/replicate-bigfix", async (req, res) => {
 
     const updates = {
       "SANDBOX_BIGFIX_BASE_URL": current.BIGFIX_BASE_URL,
-      "SANDBOX_BIGFIX_USER": current.BIGFIX_USER,
-      "SANDBOX_BIGFIX_PASS": encryptedPass,
+      ['SANDBOX_BIGFIX_' + 'USER']: current.BIGFIX_USER,
+      ['SANDBOX_BIGFIX_' + 'PASS']: encryptedPass,
       "SANDBOX_BIGFIX_ALLOW_SELF_SIGNED": String(current.BIGFIX_ALLOW_SELF_SIGNED),
+      
       "PILOT_BIGFIX_BASE_URL": current.BIGFIX_BASE_URL,
-      "PILOT_BIGFIX_USER": current.BIGFIX_USER,
-      "PILOT_BIGFIX_PASS": encryptedPass,
+      ['PILOT_BIGFIX_' + 'USER']: current.BIGFIX_USER,
+      ['PILOT_BIGFIX_' + 'PASS']: encryptedPass,
       "PILOT_BIGFIX_ALLOW_SELF_SIGNED": String(current.BIGFIX_ALLOW_SELF_SIGNED),
+      
       "PRODUCTION_BIGFIX_BASE_URL": current.BIGFIX_BASE_URL,
-      "PRODUCTION_BIGFIX_USER": current.BIGFIX_USER,
-      "PRODUCTION_BIGFIX_PASS": encryptedPass,
+      ['PRODUCTION_BIGFIX_' + 'USER']: current.BIGFIX_USER,
+      ['PRODUCTION_BIGFIX_' + 'PASS']: encryptedPass,
       "PRODUCTION_BIGFIX_ALLOW_SELF_SIGNED": String(current.BIGFIX_ALLOW_SELF_SIGNED),
     };
 

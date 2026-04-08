@@ -110,7 +110,7 @@ const vcenterClient = (ctx) => {
         }
 
         const cookie = loginRes.headers['set-cookie'];
-        client.defaults.headers.Cookie = cookie;
+        client.defaults.headers['Cookie'] = cookie;
 
         return { propertyCollector, customizationSpecManager, searchIndex };
       } catch (e) {
@@ -212,8 +212,9 @@ const vcenterClient = (ctx) => {
 
   async function getRestInventory() {
     try {
-      const auth = "Basic " + Buffer.from(`${VCENTER_USER}:${VCENTER_PASSWORD}`).toString('base64');
-      const sessRes = await restClient.post("/com/vmware/cis/session", null, { headers: { Authorization: auth } });
+      const sessRes = await restClient.post("/com/vmware/cis/session", null, { 
+          auth: { username: VCENTER_USER, password: VCENTER_PASSWORD } 
+      });
       const sessionId = sessRes.data.value;
       const headers = { "vmware-api-session-id": sessionId };
 

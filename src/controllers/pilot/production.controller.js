@@ -138,7 +138,7 @@ async function handleProductionTrigger(req, res, isForced) {
     const log = logFactory(ctx.DEBUG_LOG);
     req._logStart = Date.now();
     
-    // 🚀 Receive the array instead of single strings
+    
     const { triggeredBy, deployments, chgNumber, requireChg = true, autoMail, mailTo, mailFrom, mailCc, mailBcc, patchWindow } = req.body || {}; 
     const environment = "Production";
     
@@ -266,7 +266,7 @@ async function handleProductionTrigger(req, res, isForced) {
             scheduleActionStop(ctx, actionId, metadata);
             generatedActions.push({ actionId, siteName, fixletId, group: gName, baseline: baselineName, title: actionTitle });
           }
-      } // 🚀 END LOOP
+      } 
 
       // Send 1 Mail
       let emailError = null;

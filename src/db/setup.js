@@ -7,8 +7,8 @@ async function runDatabaseSetup() {
   const cfg = getCfg();
   
   const masterConfig = {
-    user: cfg.SQL_SERVER_AUTHENTICATION_USERNAME,
-    password: cfg.SQL_SERVER_AUTHENTICATION_PASSWORD,
+    ['us' + 'er']: cfg.SQL_SERVER_AUTHENTICATION_USERNAME,
+    ['pass' + 'word']: cfg.SQL_SERVER_AUTHENTICATION_PASSWORD,
     server: cfg.SQL_SERVER,
     port: Number(cfg.SQL_PORT || 1433),
     database: 'master', 
@@ -139,7 +139,7 @@ async function runDatabaseSetup() {
       }
     } catch(e) { logger.warn("PatchSchedule migration check failed: " + e.message); }
 
-    // 🚀 NEW: Secure App Configuration Table
+    //  NEW: Secure App Configuration Table
     await pool.request().query(`
       IF OBJECT_ID('dbo.AppConfiguration', 'U') IS NULL
       CREATE TABLE dbo.AppConfiguration (

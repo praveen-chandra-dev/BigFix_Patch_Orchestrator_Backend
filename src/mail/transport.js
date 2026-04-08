@@ -291,7 +291,7 @@ async function sendTriggerMail(smtp, {
   return info;
 }
 
-// 🚀 POST-PATCH COMPLETION MAIL
+
 async function sendPostPatchMail(smtp, {
   environment, baselineName, groupName, actionId, overallStatus, startedAt, endedAt,
   emailTo, emailFrom, emailCc, emailBcc,

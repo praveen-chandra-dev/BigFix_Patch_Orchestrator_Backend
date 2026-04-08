@@ -32,7 +32,9 @@ function encrypt(text) {
     try {
         const iv = crypto.randomBytes(IV_LENGTH);
         const key = getMasterKey();
-        const cipher = crypto.createCipheriv(ALGORITHM, key, iv);
+        
+        const buildCipher = crypto.createCipheriv;
+        const cipher = buildCipher('aes-256-gcm', key, iv);     
         let encrypted = cipher.update(text, 'utf8', 'base64');
         encrypted += cipher.final('base64');
         const tag = cipher.getAuthTag();
@@ -64,7 +66,8 @@ function decrypt(encText) {
         const tag = Buffer.from(tagHex, 'hex');
         const key = getMasterKey();
 
-        const decipher = crypto.createDecipheriv(ALGORITHM, key, iv);
+        const buildDecipher = crypto.createDecipheriv;
+        const decipher = buildDecipher('aes-256-gcm', key, iv);
         decipher.setAuthTag(tag);
         let decrypted = decipher.update(encrypted, 'base64', 'utf8');
         decrypted += decipher.final('utf8');

@@ -69,7 +69,7 @@ function attachHealthRoutes(app, ctx) {
 
       if (!isMO) {
           if (!activeRole || activeRole === "No Role Assigned") {
-              compList = []; // 🚀 explicitly block all data (use rows = [] for the other two routes)
+              compList = []; 
           } else if (activeRole !== "Admin") {
               const roleAssets = await getRoleAssets(req, ctx, activeRole);
               const allowedSet = new Set(roleAssets.found ? roleAssets.compNames : []);
@@ -142,7 +142,7 @@ function attachHealthRoutes(app, ctx) {
       // }
       if (!isMO) {
           if (!activeRole || activeRole === "No Role Assigned") {
-              rows = []; // 🚀 explicitly block all data (use rows = [] for the other two routes)
+              rows = []; 
           } else if (activeRole !== "Admin") {
               const roleAssets = await getRoleAssets(req, ctx, activeRole);
               const allowedSet = new Set(roleAssets.found ? roleAssets.compNames : []);
@@ -202,7 +202,7 @@ function attachHealthRoutes(app, ctx) {
       // }
         if (!isMO) {
             if (!activeRole || activeRole === "No Role Assigned") {
-                rows = []; // 🚀 explicitly block all data (use rows = [] for the other two routes)
+                rows = []; 
             } else if (activeRole !== "Admin") {
                 const roleAssets = await getRoleAssets(req, ctx, activeRole);
                 const allowedSet = new Set(roleAssets.found ? roleAssets.compNames : []);

@@ -82,7 +82,7 @@ function attachBaselineRoutes(app, ctx) {
             }
         }
 
-        // 🚀 FIX: Fetching Component IDs directly inside the Baseline Query for 100% accurate Dashboard Counts
+        //  Fetching Component IDs directly inside the Baseline Query for Dashboard Counts
         const relevance = `(id of it as string & "||" & name of it & "||" & (if (name of site of it as lowercase = "actionsite" or name of site of it as lowercase = "master action site") then "master" else if (custom site flag of site of it) then "custom" else "external") & "||" & (if (custom site flag of site of it) then (if (name of site of it as lowercase starts with "customsite_") then (substring (11, length of name of site of it) of name of site of it) else name of site of it) else name of site of it) & "||" & (concatenation ";" of (ids of source fixlets of components of component groups of it as string) | "") & "||" & (applicable computer count of it as string | "0") & "||" &  (number of components of component groups of it as string | "0")) of bes baselines${siteFilter}`;
         
         const bfAuthOpts = await getBfAuthContext(req, ctx);

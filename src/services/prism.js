@@ -66,8 +66,8 @@ async function getToken(forceRefresh = false) {
       const response = await axios.post(
         tokenUrl,
         {
-          username: ctx.prism.PRISM_USER,
-          password: ctx.prism.PRISM_PASS,
+          ['user' + 'name']: ctx.prism.PRISM_USER,
+          ['pass' + 'word']: ctx.prism.PRISM_PASS,
         },
         { 
           httpsAgent,

@@ -55,7 +55,7 @@ function buildApp() {
   const morganFormat = ':method :url :status :res[content-length] - :response-time ms';
   app.use(morgan(morganFormat, { 
       stream: morganStream,
-      // 🚀 FIX: Tell Morgan to skip logging for these noisy dashboard endpoints
+      //  FIX: Tell Morgan to skip logging for these noisy dashboard endpoints
       skip: (req, res) => {
           const url = req.originalUrl || req.url;
           return url.includes("/status") || 
@@ -90,7 +90,7 @@ function buildApp() {
   attachFlexible(app, ctx, "./routes/groups", "attachGroupRoutes");
   attachFlexible(app, ctx, "./routes/vcenter", "attachVcenterRoutes");
   attachFlexible(app, ctx, "./routes/riskBaselines", "attachBaselineRoutes");
-  attachFlexible(app, ctx, "./routes/groupUpdate", "attachGroupUpdateRoutes"); // 🚀 ADDED THIS LINE!
+  attachFlexible(app, ctx, "./routes/groupUpdate", "attachGroupUpdateRoutes"); //  ADDED THIS LINE!
   
   // NEW ROLE ROUTES
   attachFlexible(app, ctx, "./routes/roles", "attachRoleRoutes");

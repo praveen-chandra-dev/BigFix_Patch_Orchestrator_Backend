@@ -53,7 +53,7 @@ function toResultsCSV(data) {
   return csvRows.join("\r\n");
 }
 
-// 🚀 FETCH PATCH CONTENT QUERY
+//  FETCH PATCH CONTENT QUERY
 async function fetchBaselinePatches(bigfixCtx, baselineName, bfAuthOpts) {
   try {
     const { BIGFIX_BASE_URL } = bigfixCtx;

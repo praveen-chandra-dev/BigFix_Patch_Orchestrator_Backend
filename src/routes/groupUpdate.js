@@ -94,7 +94,7 @@ function attachGroupUpdateRoutes(app, ctx) {
                 groupData.type = "ServerBased";
                 groupData.name = parsed.BESAPI.ServerBasedGroup.Name;
                 
-                // 🚀 Extract Logic (All vs Any) from XML
+                
                 const rulesBlock = parsed.BESAPI.ServerBasedGroup.MembershipRules;
                 groupData.logic = rulesBlock?.$?.JoinByIntersection === "false" ? "Any" : "All";
                 
@@ -107,7 +107,7 @@ function attachGroupUpdateRoutes(app, ctx) {
                 groupData.type = "Automatic";
                 groupData.name = parsed.BES.ComputerGroup.Title;
                 
-                // 🚀 Extract Logic (All vs Any) from XML
+               
                 groupData.logic = parsed.BES.ComputerGroup.JoinByIntersection === "false" ? "Any" : "All";
 
                 const searchComps = parsed.BES.ComputerGroup.SearchComponentPropertyReference;
@@ -130,7 +130,7 @@ function attachGroupUpdateRoutes(app, ctx) {
     app.put("/api/groups/:id", async (req, res) => {
         try {
             const { id } = req.params;
-            // 🚀 Extract logic (All/Any) from req.body
+            
             const { name, type, conditions, computerIds, logic } = req.body; 
             const isIntersection = logic === "Any" ? "false" : "true";
 
@@ -149,7 +149,7 @@ function attachGroupUpdateRoutes(app, ctx) {
             } else if (type === "Automatic") {
                 const searchComponents = (conditions || []).map(cond => `<SearchComponentPropertyReference PropertyName="${escapeXML(cond.property)}" Comparison="${escapeXML(cond.operator)}"><SearchText>${escapeXML(cond.value)}</SearchText><Relevance></Relevance></SearchComponentPropertyReference>`).join("");
                 
-                // 🚀 Inject ${isIntersection} boolean value
+                
                 xmlBody = `<?xml version="1.0" encoding="UTF-8"?><BES xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="BES.xsd"><ComputerGroup><Title>${escapeXML(name)}</Title><JoinByIntersection>${isIntersection}</JoinByIntersection>${searchComponents}</ComputerGroup></BES>`;
             } else if (type === "ServerBased") {
                 let searchComponents = "";
@@ -162,7 +162,7 @@ function attachGroupUpdateRoutes(app, ctx) {
                     searchComponents += `<MembershipRule Comparison="${escapeXML(cond.operator)}"><PropertyID>${escapeXML(pid)}</PropertyID><SearchText>${escapeXML(cond.value)}</SearchText></MembershipRule>`;
                 }
                 
-                // 🚀 Inject ${isIntersection} boolean value
+                
                 xmlBody = `<?xml version="1.0" encoding="UTF-8"?><BESAPI xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="BESAPI.xsd"><ServerBasedGroup><Name>${escapeXML(name)}</Name><MembershipRules JoinByIntersection="${isIntersection}">${searchComponents}</MembershipRules></ServerBasedGroup></BESAPI>`;
             }
 
