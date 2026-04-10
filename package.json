@@ -22,7 +22,7 @@
     "ldapts": "^8.0.35",
     "morgan": "^1.10.1",
     "mssql": "^12.1.0",
-    "nodemailer": "^7.0.10",
+    "nodemailer": "^8.0.5",
     "selfsigned": "^4.0.0",
     "tough-cookie": "^6.0.0",
     "uuid": "^13.0.0",

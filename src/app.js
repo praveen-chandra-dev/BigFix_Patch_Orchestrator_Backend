@@ -115,10 +115,17 @@ function buildApp() {
 
   const { warmCache } = require("./services/cacheWarmup");
 
+  // Initial warmup on startup
   setTimeout(() => {
     warmCache();
   }, 5000);
 
+
+  setInterval(() => {
+    console.log("[App] Running scheduled background cache warmup...");
+    warmCache();
+  }, 5.5 * 60 * 60 * 1000);
+  
   // --- UI SERVING ---
   app.get('/env.js', (req, res) => {
     const jsContent = `window.env = { VITE_API_BASE: window.location.origin };`;
