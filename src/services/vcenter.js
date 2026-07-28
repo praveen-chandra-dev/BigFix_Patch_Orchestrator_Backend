@@ -1,9 +1,11 @@
-// bigfix-backend/src/services/vcenter.js
+// src/services/vcenter.js
 const axios = require("axios");
 const https = require("https");
 
+const resolveCache = new Map(); 
+
 const vcenterClient = (ctx) => {
-  const config = ctx.servicenow || ctx.vcenter || {};
+  const config = ctx.vcenter || ctx.cfg || {};
   const VCENTER_URL = ctx.VCENTER_URL || config.VCENTER_URL || process.env.VCENTER_URL;
   const VCENTER_USER = ctx.VCENTER_USER || config.VCENTER_USER || process.env.VCENTER_USER;
   const VCENTER_PASSWORD = ctx.VCENTER_PASSWORD || config.VCENTER_PASSWORD || process.env.VCENTER_PASSWORD;
@@ -13,12 +15,13 @@ const vcenterClient = (ctx) => {
     throw new Error("VCenter configuration is missing (URL, User, or Password).");
   }
 
-  const host = VCENTER_URL.replace(/^https?:\/\//, "").replace(/\/+$/, "");
+  const host = VCENTER_URL.replace(/^https?:\/\//, "").replace(/\/$/, "");
   const soapBaseUrl = `https://${host}/sdk`;
   const restBaseUrl = `https://${host}/rest`;
 
   const httpsAgent = new https.Agent({ 
-    rejectUnauthorized: String(VCENTER_ALLOW_SELF_SIGNED).toLowerCase() !== "true" 
+    rejectUnauthorized: String(VCENTER_ALLOW_SELF_SIGNED).toLowerCase() !== "true",
+    maxSockets: 15
   });
 
   const client = axios.create({
@@ -44,13 +47,14 @@ const vcenterClient = (ctx) => {
     </soapenv:Envelope>
   `;
 
-  // Strict Tag Extraction
   const extractVal = (xml, tag) => {
     if (!xml) return null;
     const regex = new RegExp(`<(?:\w+:)?${tag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/(?:\\w+:)?${tag}>`, 'i');
     const match = xml.match(regex);
     return match ? match[1].trim() : null;
   };
+
+  let loginPromise = null;
 
   const postSoap = async (body) => {
     const xml = createEnvelope(body);
@@ -59,80 +63,71 @@ const vcenterClient = (ctx) => {
       const data = typeof res.data === 'string' ? res.data : String(res.data);
       if (data.includes("Fault>") || data.includes(":Fault>")) {
          const fault = extractVal(data, "faultstring");
+         
+         // Reset cache on timeout/auth errors
+         if (fault && (fault.toLowerCase().includes("notauthenticated") || fault.toLowerCase().includes("session"))) {
+             loginPromise = null;
+         }
+
          const errMsg = fault || `Unknown SOAP Fault. RAW Response: ${data.substring(0, 300)}...`;
          return { error: errMsg }; 
       }
       return { data };
     } catch (err) {
+      if (err.response && [401, 403].includes(err.response.status)) loginPromise = null;
       throw new Error(`VCenter Connection Failed: ${err.message}`);
     }
   };
 
-  // --- AUTH & SESSION ---
-  let loginPromise = null;
   async function connectAndLogin() {
     if (loginPromise) return loginPromise;
     loginPromise = (async () => {
-      const svcRes = await postSoap(`<urn:RetrieveServiceContent><urn:_this type="ServiceInstance">ServiceInstance</urn:_this></urn:RetrieveServiceContent>`);
-      if (svcRes.error) throw new Error(`ServiceContent Error: ${svcRes.error}`);
-
-      const sessionManager = extractVal(svcRes.data, "sessionManager");
-      const propertyCollector = extractVal(svcRes.data, "propertyCollector");
-      const customizationSpecManager = extractVal(svcRes.data, "customizationSpecManager");
-      const searchIndex = extractVal(svcRes.data, "searchIndex");
-
-      if (!sessionManager) throw new Error("Failed to retrieve VCenter ServiceContent");
-
-      let plainPass = VCENTER_PASSWORD;
       try {
-        if (/^[A-Za-z0-9+/=]+$/.test(VCENTER_PASSWORD) && VCENTER_PASSWORD.length % 4 === 0) {
-           const decoded = Buffer.from(VCENTER_PASSWORD, 'base64').toString('utf-8');
-           if (decoded) plainPass = decoded;
+        const svcRes = await postSoap(`<urn:RetrieveServiceContent><urn:_this type="ServiceInstance">ServiceInstance</urn:_this></urn:RetrieveServiceContent>`);
+        if (svcRes.error) throw new Error(`ServiceContent Error: ${svcRes.error}`);
+
+        const sessionManager = extractVal(svcRes.data, "sessionManager");
+        const propertyCollector = extractVal(svcRes.data, "propertyCollector");
+        const customizationSpecManager = extractVal(svcRes.data, "customizationSpecManager");
+        const searchIndex = extractVal(svcRes.data, "searchIndex");
+
+        if (!sessionManager) throw new Error("Failed to retrieve VCenter ServiceContent");
+
+        const safeUser = VCENTER_USER.replace(/[<>&'"]/g, c => `&#${c.charCodeAt(0)};`);
+        const safePass = VCENTER_PASSWORD.replace(/[<>&'"]/g, c => `&#${c.charCodeAt(0)};`);
+
+        const loginRes = await client.post("", createEnvelope(`
+          <urn:Login>
+             <urn:_this type="SessionManager">${sessionManager}</urn:_this>
+             <urn:userName>${safeUser}</urn:userName>
+             <urn:password>${safePass}</urn:password>
+          </urn:Login>
+        `));
+
+        const loginData = String(loginRes.data);
+        if (loginData.includes("Fault>")) {
+           throw new Error(`VCenter Login Error: ${extractVal(loginData, "faultstring") || "Unknown"}`);
         }
-      } catch (e) {}
 
-      const safeUser = VCENTER_USER.replace(/[<>&'"]/g, c => `&#${c.charCodeAt(0)};`);
-      const safePass = plainPass.replace(/[<>&'"]/g, c => `&#${c.charCodeAt(0)};`);
+        const cookie = loginRes.headers['set-cookie'];
+        client.defaults.headers['Cookie'] = cookie;
 
-      const loginRes = await client.post("", createEnvelope(`
-        <urn:Login>
-           <urn:_this type="SessionManager">${sessionManager}</urn:_this>
-           <urn:userName>${safeUser}</urn:userName>
-           <urn:password>${safePass}</urn:password>
-        </urn:Login>
-      `));
-
-      const loginData = String(loginRes.data);
-      if (loginData.includes("Fault>")) {
-         throw new Error(`VCenter Login Error: ${extractVal(loginData, "faultstring") || "Unknown"}`);
+        return { propertyCollector, customizationSpecManager, searchIndex };
+      } catch (e) {
+        loginPromise = null;
+        throw e;
       }
-
-      const cookie = loginRes.headers['set-cookie'];
-      client.defaults.headers.Cookie = cookie;
-
-      return { propertyCollector, customizationSpecManager, searchIndex };
     })();
     return loginPromise;
   }
 
-  // --- CLONE HELPERS ---
-
   async function resolveResourcePool(hostId, propertyCollector) {
-    const hostBody = `
-      <urn:RetrieveProperties>
-        <urn:_this type="PropertyCollector">${propertyCollector}</urn:_this>
-        <urn:specSet>
-          <urn:propSet><urn:type>HostSystem</urn:type><urn:pathSet>parent</urn:pathSet></urn:propSet>
-          <urn:objectSet><urn:obj type="HostSystem">${hostId}</urn:obj></urn:objectSet>
-        </urn:specSet>
-      </urn:RetrieveProperties>`;
-    
+    const hostBody = `<urn:RetrieveProperties><urn:_this type="PropertyCollector">${propertyCollector}</urn:_this><urn:specSet><urn:propSet><urn:type>HostSystem</urn:type><urn:pathSet>parent</urn:pathSet></urn:propSet><urn:objectSet><urn:obj type="HostSystem">${hostId}</urn:obj></urn:objectSet></urn:specSet></urn:RetrieveProperties>`;
     const hostRes = await postSoap(hostBody);
     if (hostRes.error) throw new Error("Failed to resolve Host Parent: " + hostRes.error);
 
-    const parentMatch = hostRes.data.match(/<(?:\w+:)?val[^>]*\s+type="([^"]+)"[^>]*>([^<]+)<\//i) || 
-                        hostRes.data.match(/<(?:\w+:)?val[^>]*>([^<]+)<\//i);
-    
+    // FIX: Optimized regex to prevent catastrophic backtracking (ReDoS)
+    const parentMatch = hostRes.data.match(/<(?:\w+:)?val\b[^>]*?type="([^"]+)"[^>]*>([^<]+)<\//i) || hostRes.data.match(/<(?:\w+:)?val[^>]*>([^<]+)<\//i);
     if (!parentMatch) throw new Error("Could not find Host Parent in response.");
     
     let parentType, parentId;
@@ -144,31 +139,17 @@ const vcenterClient = (ctx) => {
         throw new Error("Host Parent Type missing in response attributes.");
     }
 
-    const poolBody = `
-      <urn:RetrieveProperties>
-        <urn:_this type="PropertyCollector">${propertyCollector}</urn:_this>
-        <urn:specSet>
-          <urn:propSet><urn:type>${parentType}</urn:type><urn:pathSet>resourcePool</urn:pathSet></urn:propSet>
-          <urn:objectSet><urn:obj type="${parentType}">${parentId}</urn:obj></urn:objectSet>
-        </urn:specSet>
-      </urn:RetrieveProperties>`;
-
+    const poolBody = `<urn:RetrieveProperties><urn:_this type="PropertyCollector">${propertyCollector}</urn:_this><urn:specSet><urn:propSet><urn:type>${parentType}</urn:type><urn:pathSet>resourcePool</urn:pathSet></urn:propSet><urn:objectSet><urn:obj type="${parentType}">${parentId}</urn:obj></urn:objectSet></urn:specSet></urn:RetrieveProperties>`;
     const poolRes = await postSoap(poolBody);
     if (poolRes.error) throw new Error("Failed to resolve Resource Pool: " + poolRes.error);
     
     const poolId = extractVal(poolRes.data, "val");
     if (!poolId || poolId.includes("<")) throw new Error("Resource Pool ID extraction failed.");
-    
     return poolId;
   }
 
   async function getCustomizationSpec(specName, specManagerId) {
-    const body = `
-      <urn:GetCustomizationSpec>
-        <urn:_this type="CustomizationSpecManager">${specManagerId}</urn:_this>
-        <urn:name>${specName}</urn:name>
-      </urn:GetCustomizationSpec>`;
-    
+    const body = `<urn:GetCustomizationSpec><urn:_this type="CustomizationSpecManager">${specManagerId}</urn:_this><urn:name>${specName}</urn:name></urn:GetCustomizationSpec>`;
     const res = await postSoap(body);
     if (res.error) throw new Error(`OS Spec '${specName}' not found or error: ` + res.error);
 
@@ -232,16 +213,9 @@ const vcenterClient = (ctx) => {
 
   async function getRestInventory() {
     try {
-      let plainPass = VCENTER_PASSWORD;
-      try {
-        if (/^[A-Za-z0-9+/=]+$/.test(VCENTER_PASSWORD) && VCENTER_PASSWORD.length % 4 === 0) {
-           const decoded = Buffer.from(VCENTER_PASSWORD, 'base64').toString('utf-8');
-           if (decoded) plainPass = decoded;
-        }
-      } catch (e) {}
-
-      const auth = "Basic " + Buffer.from(`${VCENTER_USER}:${plainPass}`).toString('base64');
-      const sessRes = await restClient.post("/com/vmware/cis/session", null, { headers: { Authorization: auth } });
+      const sessRes = await restClient.post("/com/vmware/cis/session", null, { 
+          auth: { username: VCENTER_USER, password: VCENTER_PASSWORD } 
+      });
       const sessionId = sessRes.data.value;
       const headers = { "vmware-api-session-id": sessionId };
 
@@ -267,7 +241,6 @@ const vcenterClient = (ctx) => {
     }
   }
 
-  // --- TASKS ---
   async function getTasksStatus(taskIds) {
     if (!taskIds || !taskIds.length) return {};
     try {
@@ -280,15 +253,10 @@ const vcenterClient = (ctx) => {
     } catch (e) { throw e; }
   }
 
-  // FIXED PARSER: Handles namespace variations for Task Info
   const parseTaskStatusResponse = (xml) => {
     const statuses = {};
     if (!xml) return statuses;
-    
-    // Split by object return sets (each task response)
-    // Looking for <objects> or <returnval>
     const chunks = xml.split(/<(?:\w+:)?obj type="Task">/i);
-    
     for (let i = 1; i < chunks.length; i++) {
        const chunk = chunks[i];
        const idMatch = /^([^<]+)<\//.exec(chunk); 
@@ -298,12 +266,9 @@ const vcenterClient = (ctx) => {
        let state = "unknown";
        let error = null;
 
-       // Regex to find info.state value
-       // matches: <name>info.state</name><val ...>success</val>
        const sm = chunk.match(/<(?:\w+:)?name>info\.state<\/(?:\w+:)?name>[\s\S]*?<(?:\w+:)?val[^>]*>([^<]+)<\//i);
        if (sm) state = sm[1];
 
-       // Regex to find info.error localized message
        const em = chunk.match(/<(?:\w+:)?name>info\.error<\/(?:\w+:)?name>[\s\S]*?<(?:\w+:)?localizedMessage>([^<]+)<\//i);
        if (em) error = em[1];
 
@@ -315,24 +280,84 @@ const vcenterClient = (ctx) => {
   async function resolveTargets(targetList) {
     if (!targetList || !targetList.length) return [];
     try {
-      const { searchIndex } = await connectAndLogin();
+      let loginData = await connectAndLogin();
       const resolved = [];
-      for (const t of targetList) {
-        let foundId = null;
-        if (t.ips && Array.isArray(t.ips)) {
-          for (const rawIp of t.ips) {
-            const ip = String(rawIp).trim();
-            if (!ip) continue;
-            const soapBody = `<urn:FindByIp><urn:_this type="SearchIndex">${searchIndex}</urn:_this><urn:ip>${ip}</urn:ip><urn:vmSearch>true</urn:vmSearch></urn:FindByIp>`;
-            const r = await postSoap(soapBody);
-            if (r.error) continue;
-            const vmId = extractVal(r.data, "returnval");
-            if (vmId) { foundId = vmId; break; }
-          }
-        }
-        if (foundId) resolved.push({ ...t, id: foundId });
+      const ipv4Regex = /^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/;
+
+      const BATCH_SIZE = 10;
+      for (let i = 0; i < targetList.length; i += BATCH_SIZE) {
+        const batch = targetList.slice(i, i + BATCH_SIZE);
+        
+        const batchPromises = batch.map(async (t) => {
+           let foundId = null;
+           
+           if (t.ips && Array.isArray(t.ips)) {
+              for (const rawIp of t.ips) {
+                 if (foundId) break;
+                 const ip = String(rawIp).trim();
+                 
+                 if (!ip || !ipv4Regex.test(ip)) continue; 
+                 
+                 if (resolveCache.has(ip)) {
+                     foundId = resolveCache.get(ip);
+                     continue;
+                 }
+
+                 try {
+                    let soapBody = `<urn:FindByIp><urn:_this type="SearchIndex">${loginData.searchIndex}</urn:_this><urn:ip>${ip}</urn:ip><urn:vmSearch>true</urn:vmSearch></urn:FindByIp>`;
+                    let r = await postSoap(soapBody);
+                    
+                    if (r.error && r.error.toLowerCase().includes("notauthenticated")) {
+                        loginData = await connectAndLogin();
+                        soapBody = `<urn:FindByIp><urn:_this type="SearchIndex">${loginData.searchIndex}</urn:_this><urn:ip>${ip}</urn:ip><urn:vmSearch>true</urn:vmSearch></urn:FindByIp>`;
+                        r = await postSoap(soapBody);
+                    }
+
+                    if (!r.error) {
+                        const vmId = extractVal(r.data, "returnval");
+                        if (vmId) { 
+                            foundId = vmId; 
+                            resolveCache.set(ip, vmId); 
+                        }
+                    }
+                 } catch(e) { } 
+              }
+           }
+
+           if (!foundId && t.name) {
+               const nameLower = String(t.name).toLowerCase();
+               if (resolveCache.has(nameLower)) {
+                   foundId = resolveCache.get(nameLower);
+               } else {
+                   try {
+                       let soapBody = `<urn:FindByDnsName><urn:_this type="SearchIndex">${loginData.searchIndex}</urn:_this><urn:dnsName>${t.name}</urn:dnsName><urn:vmSearch>true</urn:vmSearch></urn:FindByDnsName>`;
+                       let r = await postSoap(soapBody);
+                       
+                       if (r.error && r.error.toLowerCase().includes("notauthenticated")) {
+                           loginData = await connectAndLogin();
+                           soapBody = `<urn:FindByDnsName><urn:_this type="SearchIndex">${loginData.searchIndex}</urn:_this><urn:dnsName>${t.name}</urn:dnsName><urn:vmSearch>true</urn:vmSearch></urn:FindByDnsName>`;
+                           r = await postSoap(soapBody);
+                       }
+
+                       if (!r.error) {
+                           const vmId = extractVal(r.data, "returnval");
+                           if (vmId) { 
+                               foundId = vmId; 
+                               resolveCache.set(nameLower, vmId); 
+                           }
+                       }
+                   } catch(e) { } 
+               }
+           }
+
+           return foundId ? { ...t, id: foundId } : null;
+        });
+
+        const results = await Promise.all(batchPromises);
+        resolved.push(...results);
       }
-      return resolved;
+
+      return resolved.filter(Boolean);
     } catch (e) { throw e; }
   }
 

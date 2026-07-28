@@ -1,4 +1,5 @@
 const cache = new Map();
+const locks = new Map();
 
 /* =========================================
    CONFIG
@@ -32,6 +33,9 @@ function getCache(key) {
 
 function setCache(key, value, ttlMs = DEFAULT_TTL) {
 
+  if (!value || (Array.isArray(value) && value.length === 0)) {
+    return;
+  }
   /* Prevent unlimited cache growth */
   if (cache.size >= MAX_CACHE_SIZE) {
     const firstKey = cache.keys().next().value;
@@ -45,6 +49,54 @@ function setCache(key, value, ttlMs = DEFAULT_TTL) {
 
 }
 
+
+function updatePatchesInCache(patchesToUpdate) {
+  const key = "patches";
+  const entry = cache.get(key);
+
+  if (!entry || !Array.isArray(entry.value)) return;
+
+  const updateMap = new Map(
+    patchesToUpdate.map(p => [
+      `${p.patch_id}|${p.site_name.toLowerCase().trim()}`,
+      p
+    ])
+  );
+
+  const updated = entry.value.map((p) => {
+    const match = updateMap.get(
+      `${p.patch_id}|${String(p.site_name).toLowerCase().trim()}`
+    );
+
+    if (match) {
+      return { ...p, status: match.status };
+    }
+
+    return p;
+  });
+
+  cache.set(key, {
+    value: updated,
+    expiry: entry.expiry,
+  });
+}
+
+
+async function withCacheLock(key, fn) {
+  if (locks.has(key)) {
+    return locks.get(key);
+  }
+
+  const promise = fn().finally(() => {
+    locks.delete(key);
+  });
+
+  locks.set(key, promise);
+
+  return promise;
+}
+
+
 /* =========================================
    Clear entire cache
 ========================================= */
@@ -56,5 +108,7 @@ function clearCache() {
 module.exports = {
   getCache,
   setCache,
+  updatePatchesInCache,
+  withCacheLock,
   clearCache
 };

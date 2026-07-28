@@ -24,7 +24,7 @@ function attachSnValidate(app, ctx) {
         return res.status(500).json({ ok: false, error: "ServiceNow env not configured (SN_URL, SN_USER, SN_PASSWORD required)" });
       }
 
-      let snBase = SN_URL.replace(/\/+$/, "");
+      let snBase = SN_URL.replace(/\/$/, "");
       if (/\/api\/now$/i.test(snBase)) snBase = snBase.replace(/\/api\/now$/i, "");
       const endpoint =
         `${snBase}/api/now/table/change_request` +

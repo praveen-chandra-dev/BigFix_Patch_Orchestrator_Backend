@@ -1,80 +1,54 @@
-// src/envManage.js news
-const fs = require("fs");
-const path = require("path");
-const os = require("os");
+// src/envManage.js
+const { getPool, sql } = require("./db/mssql");
+const { encrypt } = require("./utils/crypto");
 
-function envPath() {
-  return path.resolve(process.cwd(), ".env");
-}
+// Keys that must be encrypted before being saved to the database
+const SECRET_KEYS = new Set([
+  "BIGFIX_PASS", "SANDBOX_BIGFIX_PASS", "PILOT_BIGFIX_PASS", "PRODUCTION_BIGFIX_PASS",
+  "SN_PASSWORD", "SMTP_PASSWORD", "VCENTER_PASSWORD", "PRISM_PASS"
+]);
 
-function readEnvFile() {
-  const p = envPath();
-  if (!fs.existsSync(p)) return [];
-  const raw = fs.readFileSync(p, "utf8");
-  const lines = raw.split(/\r?\n/);
-  const items = [];
-  for (const line of lines) {
-    if (!line || line.trim().startsWith("#")) continue;
-    const idx = line.indexOf("=");
-    if (idx === -1) continue;
-    const key = line.slice(0, idx).trim();
-    let val = line.slice(idx + 1);
-    if (
-      (val.startsWith('"') && val.endsWith('"')) ||
-      (val.startsWith("'") && val.endsWith("'"))
-    ) {
-      val = val.slice(1, -1);
+function envPath() { return "Database"; }
+function readEnvFile() { return []; } 
+
+async function writeEnvAtomicAsync(updates) {
+  if (!updates || Object.keys(updates).length === 0) return;
+  const pool = await getPool();
+  
+  for (const [key, value] of Object.entries(updates)) {
+    let finalValue = String(value ?? "");
+    
+    // Intercept and encrypt passwords before saving to DB
+    if (SECRET_KEYS.has(key) && finalValue) {
+        const encrypted = encrypt(finalValue);
+        if (encrypted) finalValue = encrypted;
     }
-    items.push({ key, value: val });
+
+    // Upsert into AppConfiguration table
+    await pool.request()
+      .input('Key', sql.NVarChar(128), key)
+      .input('Value', sql.NVarChar(sql.MAX), finalValue)
+      .query(`
+        MERGE dbo.AppConfiguration AS target
+        USING (SELECT @Key AS ConfigKey) AS source
+        ON (target.ConfigKey = source.ConfigKey)
+        WHEN MATCHED THEN 
+            UPDATE SET ConfigValue = @Value, UpdatedAt = SYSUTCDATETIME()
+        WHEN NOT MATCHED THEN 
+            INSERT (ConfigKey, ConfigValue, UpdatedAt) 
+            VALUES (@Key, @Value, SYSUTCDATETIME());
+      `);
   }
-  return items;
 }
 
-function toEnvContent(dict, existingOrder = []) {
-  const keys = [];
-  const seen = new Set();
-  existingOrder.forEach((k) => {
-    if (k in dict) {
-      keys.push(k);
-      seen.add(k);
-    }
-  });
-  Object.keys(dict)
-    .sort()
-    .forEach((k) => {
-      if (!seen.has(k)) keys.push(k);
-    });
-
-  const lines = keys.map((k) => {
-    let v = dict[k] ?? "";
-    if (/[^\w@%+:/.,\-]/.test(v)) v = JSON.stringify(String(v));
-    return `${k}=${v}`;
-  });
-  lines.push("");
-  return lines.join(os.EOL);
-}
-
-/**
- * Save to `.env` (no .bak). Uses tmp+rename for atomicity.
- */
+// Export a wrapper to maintain compatibility with existing Express routes
 function writeEnvAtomic(updates) {
-  const p = envPath();
-  const tmp = p + ".tmp";
-
-  const items = readEnvFile();
-  const order = items.map((i) => i.key);
-  const dict = {};
-  items.forEach((i) => {
-    dict[i.key] = i.value;
-  });
-  Object.keys(updates || {}).forEach((k) => {
-    dict[k] = String(updates[k] ?? "");
-  });
-
-  const data = toEnvContent(dict, order);
-  fs.writeFileSync(tmp, data, { encoding: "utf8", mode: 0o600 });
-  fs.renameSync(tmp, p);
-  return { path: p };
+  writeEnvAtomicAsync(updates)
+    .then(() => console.log("[EnvManage] Settings securely saved to Database."))
+    .catch(err => console.error("[EnvManage] Failed to save settings to DB:", err.message));
+  
+  // Return dummy path to satisfy caller
+  return { path: "db" };
 }
 
-module.exports = { readEnvFile, writeEnvAtomic, envPath };
+module.exports = { readEnvFile, writeEnvAtomic, writeEnvAtomicAsync, envPath };

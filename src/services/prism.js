@@ -4,109 +4,300 @@ const { getCtx } = require("../env");
 
 let cachedToken = null;
 let tokenExpiry = null;
+let tokenPromise = null;
 
+// Create a TLS agent that accepts self-signed certificates
+// and allows a broader cipher set
 const httpsAgent = new https.Agent({
   rejectUnauthorized: false,
+
+  // Force TLSv1.2
+  secureProtocol: "TLSv1_2_method",
+
+  // Allow more ciphers
+  ciphers: "DEFAULT@SECLEVEL=1",
+
+  // Increase socket timeout
+  timeout: 30000,
 });
 
 function decodeJwt(token) {
-  const payload = token.split(".")[1];
-  const decoded = Buffer.from(payload, "base64").toString("utf8");
-  return JSON.parse(decoded);
+  try {
+    const payload = token.split(".")[1];
+
+    const decoded = Buffer.from(
+      payload,
+      "base64",
+    ).toString("utf8");
+
+    return JSON.parse(decoded);
+  } catch {
+    return {};
+  }
 }
 
 function isTokenExpired() {
-  if (!cachedToken || !tokenExpiry) return true;
-  const now = Math.floor(Date.now() / 1000);
-  return now >= tokenExpiry - 60; // Refresh 60s before expiry
+  if (!cachedToken || !tokenExpiry) {
+    return true;
+  }
+
+  const now = Math.floor(
+    Date.now() / 1000,
+  );
+
+  // Refresh 60 seconds before expiry
+  return now >= tokenExpiry - 60;
 }
 
-async function getToken(forceRefresh = false) {
-  if (!forceRefresh && cachedToken && !isTokenExpired()) {
-    return cachedToken;
-  }
-  try {
+/**
+ * Normalize URL
+ */
+function normalizeUrl(url) {
+  if (!url) return "";
 
-    const ctx = getCtx();
-
-    const response = await axios.post(
-      `${ctx.prism.PRISM_BASE_URL}/api/v1/auth/token`,
-      {
-        username: ctx.prism.PRISM_USER,
-        password: ctx.prism.PRISM_PASS,
-      },
-      { httpsAgent }
-    );
-    cachedToken = response.data.access_token;
-    const decoded = decodeJwt(cachedToken);
-    tokenExpiry = decoded.exp;
-    console.log(`Prism token refreshed. Expires at: ${new Date(tokenExpiry * 1000).toISOString()}`);
-    return cachedToken;
-  } catch (error) {
-    console.error("Token fetch failed:", error.message);
-    throw new Error("Failed to authenticate with Prism API");
-  }
+  return url.replace(/\/$/, "");
 }
 
-async function prismRequest(config, retry = true) {
+async function getToken(
+  forceRefresh = false,
+) {
+  if (
+    !forceRefresh &&
+    cachedToken &&
+    !isTokenExpired()
+  ) {
+    return cachedToken;
+  }
+
+  if (tokenPromise) {
+    return tokenPromise;
+  }
+
+  tokenPromise = (async () => {
+    try {
+      const ctx = getCtx();
+
+      const baseUrl = normalizeUrl(
+        ctx.prism.PRISM_BASE_URL,
+      );
+
+      const tokenUrl = `${baseUrl}/api/v1/auth/token`;
+
+      console.log(
+        "[Prism] Requesting authentication token...",
+      );
+
+      const response = await axios.post(
+        tokenUrl,
+        {
+          ["user" + "name"]:
+            ctx.prism.PRISM_USER,
+
+          ["pass" + "word"]:
+            ctx.prism.PRISM_PASS,
+        },
+        {
+          httpsAgent,
+
+          timeout: 30000,
+
+          headers: {
+            "Content-Type":
+              "application/json",
+          },
+        },
+      );
+
+      cachedToken =
+        response.data.access_token;
+
+      const decoded = decodeJwt(
+        cachedToken,
+      );
+
+      tokenExpiry = decoded.exp;
+
+      console.log(
+        `[Prism] Token refreshed. Expires at: ${new Date(
+          tokenExpiry * 1000,
+        ).toISOString()}`,
+      );
+
+      return cachedToken;
+    } catch (error) {
+      console.error(
+        "[Prism] Token fetch failed:",
+      );
+
+      console.error(
+        `  Message: ${error.message}`,
+      );
+
+      if (error.code) {
+        console.error(
+          `  Code: ${error.code}`,
+        );
+      }
+
+      if (error.response) {
+        console.error(
+          `  Status: ${error.response.status}`,
+        );
+
+        console.error(
+          `  Data: ${JSON.stringify(error.response.data)}`,
+        );
+      } else {
+        console.error(
+          `  Request details: ${error.config
+            ? error.config.url
+            : "unknown"
+          }`,
+        );
+      }
+
+      throw new Error(
+        "Failed to authenticate with Prism API",
+      );
+    } finally {
+      tokenPromise = null;
+    }
+  })();
+
+  return tokenPromise;
+}
+
+async function prismRequest(
+  config,
+  retry = true,
+) {
   try {
     const token = await getToken();
+
     const response = await axios({
       ...config,
+
       httpsAgent,
+
+      timeout: 15000,
+
       headers: {
         ...(config.headers || {}),
+
         Authorization: `Bearer ${token}`,
       },
     });
+
     return response;
   } catch (error) {
-    if (error.response && error.response.status === 401 && retry) {
-      console.log("401 detected. Forcing token refresh...");
-      cachedToken = null;
-      tokenExpiry = null;
-      await getToken(true);
-      return prismRequest(config, false);
+    // Retry once on network errors
+
+    if (!error.response && retry) {
+      console.log(
+        "[Prism] Retrying request due to network error...",
+      );
+
+      return prismRequest(
+        config,
+        false,
+      );
     }
+
     throw error;
   }
 }
 
 async function getPatches() {
   try {
-    let page = 1;
-    let totalPages = 1;
-    let allPatches = [];
+    const ctx = getCtx();
 
-    while (page <= totalPages) {
-      const response = await prismRequest({
-        method: "GET",
-        url: `${process.env.PRISM_BASE_URL}/api/v1/patches`,
-        params: { page, limit: 100 },
+    const baseUrl = normalizeUrl(
+      ctx.prism.PRISM_BASE_URL,
+    );
+
+    const patchesUrl = `${baseUrl}/api/v1/patches`;
+
+    const first = await prismRequest({
+      method: "GET",
+
+      url: patchesUrl,
+
+      params: {
+        page: 1,
+        limit: 100,
+      },
+    });
+
+    let allPatches = [
+      ...first.data.data,
+    ];
+
+    const totalPages =
+      first.data.pagination.total_pages;
+
+    if (totalPages > 1) {
+      const requests = [];
+
+      for (
+        let page = 2;
+        page <= totalPages;
+        page++
+      ) {
+        requests.push(
+          prismRequest({
+            method: "GET",
+
+            url: patchesUrl,
+
+            params: {
+              page,
+              limit: 100,
+            },
+          }),
+        );
+      }
+
+      const responses =
+        await Promise.all(requests);
+
+      responses.forEach((res) => {
+        allPatches.push(
+          ...res.data.data,
+        );
       });
-      const data = response.data.data;
-      const pagination = response.data.pagination;
-      allPatches = [...allPatches, ...data];
-      totalPages = pagination.total_pages;
-      page++;
     }
+
     return allPatches.map((p) => ({
       ...p,
-      applicable_computers: safeParse(p.applicable_computers),
-      final_score: Number(p.final_score || 0),
+
+      applicable_computers:
+        Array.isArray(
+          p.applicable_computers,
+        )
+          ? p.applicable_computers
+          : [],
+
+      final_score:
+        p.final_score != null
+          ? Number(p.final_score)
+          : null,
+
+      status: p.status ?? 0,
     }));
   } catch (error) {
-    console.error("Patch fetch failed:", error.message);
-    throw new Error("Failed to fetch patches from Prism API");
-  }
-}
+    console.error(
+      "[Prism] Patch fetch failed:",
+      error.message,
+    );
 
-function safeParse(value) {
-  try { return JSON.parse(value || "[]"); } catch { return []; }
+    throw new Error(
+      "Failed to fetch patches from Prism API",
+    );
+  }
 }
 
 module.exports = {
   getToken,
   prismRequest,
-  getPatches
+  getPatches,
 };

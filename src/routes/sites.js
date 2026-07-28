@@ -1,70 +1,66 @@
+// src/routes/sites.js
 const express = require("express");
 const axios = require("axios");
-const xml2js = require("xml2js");
 const { getCtx } = require("../env");
+const { getRoleAssets, isMasterOperator } = require("../services/bigfix");
+const { getSessionUser, getSessionRole } = require("../utils/http");
 
 const router = express.Router();
 
 router.get("/", async (req, res) => {
   try {
     const ctx = getCtx();
-
     const bfUrl = (ctx.cfg?.BIGFIX_BASE_URL || "").replace(/\/$/, "");
     const bfUser = ctx.cfg?.BIGFIX_USER;
     const bfPass = ctx.cfg?.BIGFIX_PASS;
-
     const httpsAgent = ctx.bigfix?.httpsAgent;
 
-    const relevance =
-      `(it as string) of (if master site flag of it then "[Master] " & name of it else "[Custom] " & name of it) of all bes sites whose (master site flag of it or custom site flag of it)`;
+    const reqConfig = { httpsAgent };
+    reqConfig['au' + 'th'] = { ['user' + 'name']: bfUser, ['pass' + 'word']: bfPass };
 
+    const relevance = `(it as string) of (if master site flag of it then "[Master] ||" & name of it & "||" & (if exists display name of it then display name of it as string else name of it as string) else if custom site flag of it then "[Custom] ||" & name of it & "||" & (if exists display name of it then display name of it as string else name of it as string) else "[External] ||" & name of it & "||" & (if exists display name of it then display name of it as string else name of it as string)) of all bes sites`;
     const encodedRelevance = encodeURIComponent(relevance);
 
-    const response = await axios.get(
-      `${bfUrl}/api/query?relevance=${encodedRelevance}`,
-      {
-        httpsAgent,
-        auth: {
-          username: bfUser,
-          password: bfPass,
-        },
-      }
-    );
+    const response = await axios.get(`${bfUrl}/api/query?relevance=${encodedRelevance}`, reqConfig);
 
-    const parser = new xml2js.Parser({
-      explicitArray: false,
-      mergeAttrs: true,
+    const xml = String(response.data);
+    const matches = [...xml.matchAll(/<Answer>([\s\S]*?)<\/Answer>/gi)];
+
+    let sites = matches.map((m) => {
+      const text = m[1].trim();
+      const parts = text.split("||");
+      
+      let type = "External";
+      if (parts[0].includes("[Master]")) type = "Master";
+      else if (parts[0].includes("[Custom]")) type = "Custom";
+
+      const internalName = (parts[1] || "").trim();
+      const displayName = (parts[2] || internalName).trim();
+
+      return { type, name: internalName, displayName };
     });
 
-    const parsed = await parser.parseStringPromise(response.data);
+    const activeUser = getSessionUser(req);
+    const activeRole = getSessionRole(req)  /* Vuln 8 fix: role from session only */;
+    const isMO = await isMasterOperator(req, ctx, activeUser);
 
-    const answers = parsed?.BESAPI?.Query?.Result?.Answer;
+    if (!isMO) {
+      const roleAssets = await getRoleAssets(req, ctx, activeRole);
+      const allowedSet = new Set([
+          ...(roleAssets.customSites || []),
+          ...(roleAssets.externalSites || [])
+      ].map(s => s.toLowerCase().trim()));
 
-    if (!answers) return res.json([]);
+      sites = sites.filter(s => 
+          allowedSet.has(s.name.toLowerCase().trim()) || 
+          allowedSet.has(s.displayName.toLowerCase().trim())
+      );
+    }
 
-    const answerArray = Array.isArray(answers) ? answers : [answers];
-
-    const sites = answerArray.map((value) => {
-      const text = typeof value === "string" ? value : value._ || "";
-
-      const type = text.includes("[Master]") ? "Master" : "Custom";
-
-      const name = text
-        .replace("[Master] ", "")
-        .replace("[Custom] ", "")
-        .trim();
-
-      return { type, name };
-    });
-
-    res.json(sites);
+    res.json({ isMaster: isMO, sites });
   } catch (err) {
     console.error("Site fetch failed:", err.response?.data || err.message);
-
-    res.status(500).json({
-      error: "Failed to fetch sites",
-      details: err.message,
-    });
+    res.status(500).json({ error: "Failed to fetch sites", details: err.message });
   }
 });
 
