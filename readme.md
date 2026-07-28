@@ -1,7 +1,7 @@
 # BigFix Patch Orchestrator — Backend
 
 The API and orchestration engine behind the BigFix Patch Orchestrator. A **Node.js + Express 5**
-service that drives a **Sandbox → Pilot → Production** patch workflow on top of **HCL BigFix**,
+service that drives a **Sandbox → Pilot → Production** patch workflow on top of ** BigFix**,
 enforces promotion gates, computes health/success KPIs, and integrates with ServiceNow, LDAP/AD,
 SAML SSO, vCenter/Nutanix Prism, and SMTP. It also **serves the built frontend** as static assets,
 so the whole app runs from one HTTPS origin.
@@ -56,7 +56,7 @@ flowchart LR
     end
 
     R --> DB[("SQL Server<br/>sessions, users, config, state")]
-    R --> BF["HCL BigFix<br/>REST API"]
+    R --> BF["BigFix<br/>REST API"]
     R --> SN["ServiceNow<br/>Change validation"]
     R --> AD["LDAP / Active Directory"]
     R --> SAML["SAML / Okta SSO"]
@@ -81,7 +81,7 @@ flowchart LR
 - **Node.js ≥ 18** (Express 5 requires a modern Node) — only needed to run from source or to build
   the executable. A prebuilt `PatchSetuBackend.exe` can run without Node installed.
 - **Microsoft SQL Server** reachable from the host (the app creates/uses its schema on boot).
-- **HCL BigFix** root server reachable, with a **Master Operator** account for administrative
+- ** BigFix** root server reachable, with a **Master Operator** account for administrative
   actions (role/operator management).
 - **Windows** is the primary target (configuration can be read from the Windows Registry, and the
   app ships as a Windows `.exe`). It can run on other platforms when configuration is supplied via
@@ -253,7 +253,7 @@ All application endpoints are mounted under **`/api`**. Broad areas:
 
 ## Integrations
 
-- **HCL BigFix** — role/operator management, computer groups, baselines, actions, and live health
+- ** BigFix** — role/operator management, computer groups, baselines, actions, and live health
   via session relevance and custom `Patch_Setu_*` properties. Per-stage BigFix targets are supported
   (Sandbox/Pilot/Production) with fallback to the base server.
 - **SQL Server** — sessions, users, encrypted configuration, workflow/team state, calendar.
