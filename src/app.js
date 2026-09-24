@@ -11,23 +11,19 @@ const { attachBaselineRoutes } = require("./routes/baseline");
 const { attachGroupRoutes } = require("./routes/groups");
 const { logger } = require("./services/logger");
 const { sessionMiddleware, requireAdmin, requireAuth, purgeExpiredSessions } = require("./middlewares/session");
-
-
-function tryRequire(p) { try { return require(p); } catch (e) { console.warn(`[skip] ${p}:`, e.message); return null; } }
-function isRouter(mod) { return !!(mod && typeof mod.use === "function" && mod.handle); }
-
-function attachFlexible(app, ctx, modulePath, namedExport, mountIfRouter = "/api", guard = null) {
-  const mod = tryRequire(modulePath);
-  if (!mod) return;
-  if (namedExport && typeof mod[namedExport] === "function") { mod[namedExport](app, ctx, guard); return; }
-  if (typeof mod === "function" && !isRouter(mod)) { mod(app, ctx); return; }
-  if (isRouter(mod)) {
-    if (guard) { app.use(mountIfRouter, guard, mod); } else { app.use(mountIfRouter, mod); }
-    return;
-  }
-  const fn = Object.values(mod).find(v => typeof v === "function");
-  if (fn) fn(app, ctx);
-}
+const { attachHealthRoutes } = require("./routes/health");
+const { attachConfigRoutes } = require("./routes/config");
+const { attachWorkflowRoutes } = require("./routes/workflow");
+const { attachQueryProxy } = require("./routes/query");
+const { attachPilotRoutes } = require("./routes/pilot");
+const { attachActionsRoutes } = require("./routes/actions");
+const { attachActionHelpers } = require("./routes/actionsHelpers");
+const { attachSnValidate } = require("./routes/snValidate");
+const { attachVcenterRoutes } = require("./routes/vcenter");
+const attachRiskBaselineRoutes = require("./routes/riskBaselines");
+const { attachGroupUpdateRoutes } = require("./routes/groupUpdate");
+const { attachPoliciesRoutes } = require("./routes/policies");
+const { attachRoleRoutes } = require("./routes/roles");
 
 const SAML_CALLBACK_PATHS = new Set([
   '/api/auth/saml/callback',
@@ -136,31 +132,26 @@ function buildApp() {
   app.use("/api/env", requireAdmin);
   app.use("/api", require("./routes/env"));
 
-  attachFlexible(app, ctx, "./routes/health", "attachHealthRoutes");
-  // Vulnerability 4 fix: protect /api/config with Admin-only access
-  attachFlexible(app, ctx, "./routes/config", "attachConfigRoutes", "/api", requireAuth);
-  attachFlexible(app, ctx, "./routes/workflow", "attachWorkflowRoutes", "/api", requireAuth);
-  
-  attachFlexible(app, ctx, "./routes/query", "attachQueryProxy");
-  attachFlexible(app, ctx, "./routes/pilot", "attachPilotRoutes");
-  attachFlexible(app, ctx, "./routes/actions", "attachActionsRoutes");
-  attachFlexible(app, ctx, "./routes/actionsHelpers", "attachActionHelpers");
-  attachFlexible(app, ctx, "./routes/snValidate", "attachSnValidate");
-  attachDeploymentsRoutes(app, ctx, "./routes/deployments", "attachDeploymentsRoutes");
-  attachBaselineRoutes(app, ctx, "./routes/baseline", "attachBaselineRoutes");
-  attachFlexible(app, ctx, "./routes/groups", "attachGroupRoutes");
-  attachFlexible(app, ctx, "./routes/vcenter", "attachVcenterRoutes");
-  attachFlexible(app, ctx, "./routes/riskBaselines", "attachBaselineRoutes");
-  attachFlexible(app, ctx, "./routes/groupUpdate", "attachGroupUpdateRoutes");
-  attachFlexible(app, ctx, "./routes/policies", "attachPoliciesRoutes");
-  attachFlexible(app, ctx, "./routes/roles", "attachRoleRoutes");
+  attachHealthRoutes(app, ctx);
+  attachConfigRoutes(app, ctx, requireAuth);
+  attachWorkflowRoutes(app, ctx, requireAuth);
+  attachQueryProxy(app, ctx);
+  attachPilotRoutes(app, ctx);
+  attachActionsRoutes(app, ctx);
+  attachActionHelpers(app, ctx);
+  attachSnValidate(app, ctx);
+  attachDeploymentsRoutes(app, ctx);
+  attachBaselineRoutes(app, ctx);
+  attachGroupRoutes(app, ctx);
+  attachVcenterRoutes(app, ctx);
+  attachRiskBaselineRoutes(app, ctx);
+  attachGroupUpdateRoutes(app, ctx);
+  attachPoliciesRoutes(app, ctx);
+  attachRoleRoutes(app, ctx);
 
-  const patchRouter = tryRequire("./routes/patches");
-  const cveRouter = tryRequire("./routes/cves");
-  const sitesRouter = tryRequire("./routes/sites");
-  if (patchRouter) app.use("/api/patches", patchRouter);
-  if (cveRouter) app.use("/api/cves", cveRouter);
-  if (sitesRouter) app.use("/api/sites", sitesRouter);
+  app.use("/api/patches", require("./routes/patches"));
+  app.use("/api/cves", require("./routes/cves"));
+  app.use("/api/sites", require("./routes/sites"));
 
   // ── Cache warmup ──────────────────────────────────────────────────────────
   const { warmCache } = require("./services/cacheWarmup");
